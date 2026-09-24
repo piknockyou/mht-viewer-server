@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MHT Viewer Localhost Server v1.6
+MHT Viewer Localhost Server v1.7
 Companion to the "MHT Viewer" userscript v7.0+.
 
 Protocol:
@@ -245,29 +245,27 @@ def _render_box(items, width, box, pal):
     return "\n".join(lines)
 
 
-def print_banner(host, port, save_dir):
-    """Startup banner: what this is, how a mail gets here, why the server
-    view exists — plus the status rows. All geometry from fixed rows."""
+def _tui_setup():
+    box = _UNICODE_BOX if _tui_unicode() else _ASCII_BOX
+    return box, _tui_palette()
+
+
+def _box_width(rows):
+    return max(_TUI_MIN_W, min(_TUI_MAX_W, max(len(x) for x in rows) + 2 * _TUI_PAD))
+
+
+def print_banner_head():
+    """WHAT/HOW/WHY box. Prints FIRST at startup (no port known yet) so the
+    user knows what this thing is before any question is asked."""
     if sys.platform == "win32":
         try:
             os.system("")  # enable ANSI escape processing
         except OSError:
             pass
-    box = _UNICODE_BOX if _tui_unicode() else _ASCII_BOX
-    pal = _tui_palette()
-    base = f"http://{host}:{port}/"
-    fixed = [
-        f"MHT Viewer Localhost Server v{SERVER_VERSION}",
-        "Listening :  " + base,
-        "Upload    :  " + base + "upload",
-        "Health    :  " + base + "health",
-        f"TTL       :  {MAX_AGE_SEC // 60} min   Max stored: {MAX_STORED}",
-    ]
-    if save_dir:
-        fixed.append("Save to   :  " + save_dir)
-    width = max(_TUI_MIN_W, min(_TUI_MAX_W, max(len(x) for x in fixed) + 2 * _TUI_PAD))
+    box, pal = _tui_setup()
+    title = f"MHT Viewer Localhost Server v{SERVER_VERSION}"
     items = [
-        ("title", fixed[0]),
+        ("title", title),
         ("sep", ""),
         ("label", "WHAT"),
         (
@@ -286,7 +284,23 @@ def print_banner(host, port, save_dir):
             "row",
             "The instant Blob view is sandboxed: no extensions run on it. This serves a real http://127.0.0.1 page where SingleFile and other tools work.",
         ),
-        ("sep", ""),
+    ]
+    print(_render_box(items, _box_width([title]), box, pal), flush=True)
+
+
+def print_banner_status(host, port, save_dir):
+    """Status box. Prints AFTER the bind, so the port is the real one."""
+    box, pal = _tui_setup()
+    base = f"http://{host}:{port}/"
+    fixed = [
+        "Listening :  " + base,
+        "Upload    :  " + base + "upload",
+        "Health    :  " + base + "health",
+        f"TTL       :  {MAX_AGE_SEC // 60} min   Max stored: {MAX_STORED}",
+    ]
+    if save_dir:
+        fixed.append("Save to   :  " + save_dir)
+    items = [
         ("status", ("Listening", base)),
         ("status", ("Upload", base + "upload")),
         ("status", ("Health", base + "health")),
@@ -295,7 +309,7 @@ def print_banner(host, port, save_dir):
     if save_dir:
         items.append(("status", ("Save to", save_dir)))
     items.append(("row", "Ctrl+C to stop."))
-    print(_render_box(items, width, box, pal), flush=True)
+    print(_render_box(items, _box_width(fixed), box, pal), flush=True)
 
 
 def _pidfile(port):
@@ -650,11 +664,14 @@ def _own_console():
         return False
 
 
-def _free_console():
-    """Detach from our console window; the process keeps running headless."""
+def _hide_console_window():
+    """Hide our console window; the process keeps its console and serving."""
     import ctypes as _c
 
-    _c.windll.kernel32.FreeConsole()
+    hwnd = _c.windll.kernel32.GetConsoleWindow()
+    if not hwnd:
+        return False
+    return bool(_c.windll.user32.ShowWindow(hwnd, 0))  # SW_HIDE
 
 
 def _offer_background():
@@ -671,10 +688,9 @@ def _offer_background():
     print("Running in background - this window closes now.")
     sys.stdout.flush()
     try:
-        _free_console()
+        _hide_console_window()
     except OSError:
         pass
-    _fix_stdio()  # freed-console handles are dead; park streams on NUL
 
 
 def guided_start(args):
@@ -859,6 +875,9 @@ def main():
     if args.task_status:
         sys.exit(task_command("status"))
 
+    # Banner head first: the user learns what this is BEFORE any question.
+    print_banner_head()
+
     # Console prompts: double-click flow only. The scheduled task runs with
     # --no-browser, so it can never pop a dialog from the background.
     if (
@@ -884,7 +903,7 @@ def main():
         pass
 
     base_url = f"http://{args.host}:{port}/"
-    print_banner(args.host, port, SAVE_DIR)
+    print_banner_status(args.host, port, SAVE_DIR)
     sys.stdout.flush()
 
     if not args.no_dialogs:

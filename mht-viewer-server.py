@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MHT Viewer Localhost Server v1.10
+MHT Viewer Localhost Server v1.11
 Companion to the "MHT Viewer" userscript v7.0+.
 
 Protocol:
@@ -45,7 +45,7 @@ TASK_NAME = "MHTViewerServer"
 MAX_STORED = 50
 MAX_AGE_SEC = 60 * 60
 MAX_BODY = 256 * 1024 * 1024
-SERVER_VERSION = "1.10"
+SERVER_VERSION = "1.11"
 
 store = OrderedDict()
 store_lock = threading.Lock()
@@ -308,7 +308,7 @@ def print_banner_status(host, port, save_dir):
     ]
     if save_dir:
         items.append(("status", ("Save to", save_dir)))
-    items.append(("row", "Ctrl+C to stop."))
+    items.append(("row", "Stop: re-run this file, menu item 2."))
     print(_render_box(items, _box_width(fixed), box, pal), flush=True)
 
 
@@ -603,46 +603,10 @@ def _stop_server(host, port):
     return False
 
 
-_MB_YESNO = 4
-_MB_ICONQUESTION = 32
-_MB_ICONINFO = 64
-_IDYES = 6
-
-
-def _msgbox(text, title, style):
-    import ctypes as _c
-
-    return _c.windll.user32.MessageBoxW(0, text, title, style)
-
-
 def _task_installed():
     if os.name != "nt":
         return False
     return task_command("status", quiet=True) == 0
-
-
-def _ask_gui(prompt, default):
-    """MessageBox fallback for one y/n question (stdin unusable: pipe/.pyw)."""
-    if os.name != "nt":
-        return default
-    try:
-        return (
-            _msgbox(prompt, "MHT Viewer Server", _MB_YESNO | _MB_ICONQUESTION) == _IDYES
-        )
-    except OSError:
-        return default
-
-
-def _ask_yn(prompt, default=False):
-    """Console yes/no question. Falls back to a dialog when stdin is dead."""
-    suffix = " [Y/n]: " if default else " [y/N]: "
-    try:
-        ans = input(prompt + suffix).strip().lower()
-    except (OSError, EOFError, RuntimeError):
-        return _ask_gui(prompt, default)
-    if not ans:
-        return default
-    return ans in ("y", "yes")
 
 
 def _own_console():
@@ -650,7 +614,7 @@ def _own_console():
 
     Double-click gives the script a console window of its own; a terminal
     launch shares the terminal's console with the shell. Only the first
-    case may be hidden without stealing someone's terminal.
+    case owns the window (clear-screen gating below).
     """
     if os.name != "nt":
         return False
@@ -662,35 +626,6 @@ def _own_console():
         return _c.windll.kernel32.GetConsoleProcessList(_arr, 64) == 1
     except OSError:
         return False
-
-
-def _hide_console_window():
-    """Hide our console window; the process keeps its console and serving."""
-    import ctypes as _c
-
-    hwnd = _c.windll.kernel32.GetConsoleWindow()
-    if not hwnd:
-        return False
-    return bool(_c.windll.user32.ShowWindow(hwnd, 0))  # SW_HIDE
-
-
-def _offer_background():
-    """Offer to hide our own console window. States the deal up front."""
-    if not _own_console():
-        return
-    hide = _ask_yn(
-        "Hide this window? The server keeps running silently in the background. "
-        'To stop it later, run this file again and answer "Stop it?" with y',
-        default=False,
-    )
-    if not hide:
-        return
-    print("Running in background - this window closes now.")
-    sys.stdout.flush()
-    try:
-        _hide_console_window()
-    except OSError:
-        pass
 
 
 def stop_server_cmd(host, ports):
@@ -722,10 +657,43 @@ def _clear_screen():
         pass
 
 
+def spawn_server(args):
+    """Start the server as a detached background child. Returns its Popen.
+
+    The menu process never serves: this child (windowless pythonw where
+    available, stdio silenced) is the server. It survives menu exit.
+    """
+    import subprocess as _sp
+
+    exe = sys.executable
+    if os.name == "nt" and exe.lower().endswith("python.exe"):
+        windowless = exe[: -len("python.exe")] + "pythonw.exe"
+        if os.path.exists(windowless):
+            exe = windowless
+    cmd = [
+        exe,
+        os.path.abspath(__file__),
+        "--no-browser",
+        "--no-dialogs",
+        "--port",
+        str(args.port),
+    ]
+    if args.save:
+        cmd += ["--save", args.save]
+    return _sp.Popen(
+        cmd,
+        stdin=_sp.DEVNULL,
+        stdout=_sp.DEVNULL,
+        stderr=_sp.DEVNULL,
+        close_fds=True,
+        creationflags=getattr(_sp, "DETACHED_PROCESS", 0),
+    )
+
+
 def launcher_menu(args):
     """Numbered menu loop. Banner + live status every iteration; all options
-    always listed (unavailable ones explain why). True = start serving now,
-    False = quit leaving everything as it is."""
+    always listed (unavailable ones explain why). Never serves — choice 1
+    spawns a detached server; quitting leaves everything as it is."""
     ports = [args.port] + [p for p in PORT_FALLBACKS if p != args.port]
     own = _own_console()
     first = True
@@ -758,7 +726,27 @@ def launcher_menu(args):
             if found:
                 print(f"Already running on port {found} - nothing to start.")
                 continue
-            return True
+            print("Starting server in the background ...")
+            try:
+                spawn_server(args)
+            except OSError as e:
+                print(f"Could not start it: {e}")
+                continue
+            import time as _t
+
+            up = None
+            for _ in range(12):
+                _t.sleep(0.5)
+                up = _find_ours(args.host, ports)
+                if up is not None:
+                    break
+            if up is None:
+                print("Server did not come up - ports busy?")
+                continue
+            print_banner_status(args.host, up, args.save)
+            print("Running in the background. Close this window anytime -")
+            print("the server keeps serving. Re-run this file to stop it.")
+            continue
         if choice == "2":
             stop_server_cmd(args.host, ports)
             if _task_installed():
@@ -910,18 +898,11 @@ def main():
         help="stop the running server (same outcome as answering Stop-it? with y) and exit",
     )
     ap.add_argument(
-        "--hide",
-        action="store_true",
-        help="hide our own console window after starting (implies --no-dialogs; stop later with --stop-server)",
-    )
-    ap.add_argument(
         "--no-dialogs",
         action="store_true",
         help="never prompt (console questions or fallback dialog; also implied by --no-browser)",
     )
     args = ap.parse_args()
-    if args.hide:
-        args.no_dialogs = True
 
     if args.probe:
         found = _find_ours(
@@ -957,9 +938,11 @@ def main():
     if not menu:
         print_banner_head()
 
-    # Launcher menu: double-click flow only. The scheduled task runs with
-    # --no-browser, so it can never prompt from the background.
-    if menu and not launcher_menu(args):
+    # Launcher menu: double-click flow only, and it never serves — choice 1
+    # spawns a detached server. The scheduled task runs with --no-browser,
+    # so it can never prompt from the background.
+    if menu:
+        launcher_menu(args)
         sys.exit(0)
 
     global SAVE_DIR
@@ -979,22 +962,6 @@ def main():
     base_url = f"http://{args.host}:{port}/"
     print_banner_status(args.host, port, SAVE_DIR)
     sys.stdout.flush()
-
-    if not args.no_dialogs:
-        _offer_background()
-
-    if args.hide:
-        if _own_console():
-            print(
-                "Running in background - hiding this window. Stop it later with --stop-server."
-            )
-            sys.stdout.flush()
-            try:
-                _hide_console_window()
-            except OSError:
-                pass
-        else:
-            print("No private console - staying visible.")
 
     if not args.no_browser:
         threading.Timer(0.4, lambda: webbrowser.open(base_url)).start()

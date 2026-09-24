@@ -26,9 +26,9 @@ python mht-viewer-server.py
 
 Double-click works too on Windows: after the WHAT/HOW/WHY banner you get
 a small menu, always with live status and all options — start, stop,
-install/remove auto-start, quit. Stopping warns you if auto-start would
-restart the server within a minute. After starting you may hide the window
-(server keeps running silently; run the file again and pick Stop to stop).
+install/remove auto-start, quit. Start launches the server detached in the
+background (this window is only the control panel — close it anytime).
+Stopping warns you if auto-start would restart the server within a minute.
 Pass `--no-dialogs` to skip the menu.
 
 | Command | What it does |

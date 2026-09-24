@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MHT Viewer Localhost Server v1.3
+MHT Viewer Localhost Server v1.4
 Companion to the "MHT Viewer" userscript v7.0+.
 
 Protocol:
@@ -13,6 +13,9 @@ Protocol:
 Usage:
     python mht-viewer-server.py
     python mht-viewer-server.py --port 8090 --save ./saved --no-browser
+
+    # Double-click (Windows): the console narrates each step and asks y/n.
+    # Pass --no-dialogs to skip the questions.
 
     # Keep it alive across reboots/kills (Windows): registers a Scheduled
     # Task that starts the server at logon and re-checks every minute.
@@ -268,7 +271,7 @@ def bind_first_free(host, port):
     sys.exit(1)
 
 
-def _find_ours(host, ports):
+def _find_ours(host, ports, verbose=False):
     """Port where OUR server answers /health, or None.
 
     An open port alone proves nothing (could be anyone's occupier) —
@@ -287,9 +290,14 @@ def _find_ours(host, ports):
             c.request("GET", "/health")
             r = c.getresponse()
             if r.status == 200 and r.read() == b"ok\n":
+                if verbose:
+                    print(f"  {host}:{p} ... ours (already running)")
                 return p
+            if verbose:
+                print(f"  {host}:{p} ... occupied by something else")
         except OSError:
-            pass
+            if verbose:
+                print(f"  {host}:{p} ... no answer")
         return None
 
     with ThreadPoolExecutor(max_workers=len(ports)) as ex:
@@ -352,76 +360,62 @@ def _task_installed():
     return task_command("status", quiet=True) == 0
 
 
+def _ask_gui(prompt, default):
+    """MessageBox fallback for one y/n question (stdin unusable: pipe/.pyw)."""
+    if os.name != "nt":
+        return default
+    try:
+        return (
+            _msgbox(prompt, "MHT Viewer Server", _MB_YESNO | _MB_ICONQUESTION) == _IDYES
+        )
+    except OSError:
+        return default
+
+
+def _ask_yn(prompt, default=False):
+    """Console yes/no question. Falls back to a dialog when stdin is dead."""
+    suffix = " [Y/n]: " if default else " [y/N]: "
+    try:
+        ans = input(prompt + suffix).strip().lower()
+    except (OSError, EOFError, RuntimeError):
+        return _ask_gui(prompt, default)
+    if not ans:
+        return default
+    return ans in ("y", "yes")
+
+
 def guided_start(args):
-    """Windows double-click flow. Returns True to keep serving, False to exit."""
+    """Console double-click flow. Returns True to keep serving, False to exit."""
+    print(f"MHT Viewer server - probing {args.host} ...")
     ports = [args.port] + [p for p in PORT_FALLBACKS if p != args.port]
-    found = _find_ours(args.host, ports)
-    installed = _task_installed()
+    found = _find_ours(args.host, ports, verbose=True)
     if found:
-        _stop = _msgbox(
-            f"Server running (port {found}).\n\nStop it?",
-            "MHT Viewer Server",
-            _MB_YESNO | _MB_ICONQUESTION,
-        )
-        if _stop == _IDYES:
+        print(f"Server already running (port {found}).")
+        if _ask_yn("Stop it?"):
             if _stop_server(args.host, found):
-                _msgbox("Server stopped.", "MHT Viewer Server", _MB_ICONINFO)
+                print("Server stopped.")
             else:
-                _msgbox(
-                    "Could not stop it automatically (no pidfile — older or manual start).\nStop pythonw.exe via Task Manager.",
-                    "MHT Viewer Server",
-                    _MB_ICONINFO,
+                print(
+                    "Could not stop it automatically (no pidfile — older or manual start).\n"
+                    "Stop pythonw.exe via Task Manager."
                 )
             return False
-        if installed:
-            _drop_task = _msgbox(
-                "Auto-start is installed.\n\nRemove auto-start?",
-                "MHT Viewer Server",
-                _MB_YESNO | _MB_ICONQUESTION,
-            )
-            if _drop_task == _IDYES:
+        if _task_installed():
+            if _ask_yn("Auto-start is installed. Remove auto-start?"):
                 ok = task_command("remove") == 0
-                _msgbox(
-                    "Auto-start removed." if ok else "Removal failed — see console.",
-                    "MHT Viewer Server",
-                    _MB_ICONINFO,
-                )
+                print("Auto-start removed." if ok else "Removal failed - see above.")
             return False
-        _install = _msgbox(
-            "Install auto-start (survives restarts)?",
-            "MHT Viewer Server",
-            _MB_YESNO | _MB_ICONQUESTION,
-        )
-        if _install == _IDYES:
+        if _ask_yn("Install auto-start (survives restarts)?"):
             ok = task_command("install") == 0
-            _msgbox(
-                "Auto-start installed." if ok else "Install failed — see console.",
-                "MHT Viewer Server",
-                _MB_ICONINFO,
-            )
+            print("Auto-start installed." if ok else "Install failed - see above.")
         return False
-    if (
-        _msgbox(
-            "Start the MHT Viewer server now?",
-            "MHT Viewer Server",
-            _MB_YESNO | _MB_ICONQUESTION,
-        )
-        != _IDYES
-    ):
+    print("No server listening.")
+    if not _ask_yn("Start the server now?", default=True):
         return False
-    if not installed:
-        _want_task = _msgbox(
-            "Install auto-start so the server survives restarts?",
-            "MHT Viewer Server",
-            _MB_YESNO | _MB_ICONQUESTION,
-        )
-        if _want_task == _IDYES:
+    if not _task_installed():
+        if _ask_yn("Install auto-start so the server survives restarts?"):
             ok = task_command("install") == 0
-            _msgbox(
-                "Auto-start installed." if ok else "Install failed — see console.",
-                "MHT Viewer Server",
-                _MB_ICONINFO,
-            )
+            print("Auto-start installed." if ok else "Install failed - see above.")
     return True
 
 
@@ -517,38 +511,7 @@ def _fix_stdio():
             setattr(sys, _name, _nul)
 
 
-def _relaunch_windowless():
-    """Re-run via pythonw when double-clicked on Windows. Returns True to exit.
-
-    `.py` double-click uses python.exe, which pops a black console for the
-    whole session. A no-argument launch is the double-click case, so hand it
-    to windowless pythonw and exit; the child continues into the dialogs.
-    Explicit CLI use (`--install-task`, `--probe`, … from a terminal) keeps
-    its console, since output is the point there.
-    """
-    if os.name != "nt" or len(sys.argv) > 1:
-        return False
-    if not sys.executable.lower().endswith("python.exe"):
-        return False
-    pythonw = sys.executable[: -len("python.exe")] + "pythonw.exe"
-    if not os.path.exists(pythonw):
-        return False
-    import subprocess as _sp
-
-    _sp.Popen(
-        [pythonw, os.path.abspath(__file__)],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-        creationflags=getattr(_sp, "DETACHED_PROCESS", 0),
-    )
-    return True
-
-
 def main():
-    if _relaunch_windowless():
-        return
     _fix_stdio()
     ap = argparse.ArgumentParser(description="MHT Viewer companion server")
     ap.add_argument("--host", default=DEFAULT_HOST)
@@ -578,7 +541,7 @@ def main():
     ap.add_argument(
         "--no-dialogs",
         action="store_true",
-        help="never show the Windows guided dialogs (also implied by --no-browser)",
+        help="never prompt (console questions or fallback dialog; also implied by --no-browser)",
     )
     args = ap.parse_args()
 
@@ -603,7 +566,7 @@ def main():
     if args.task_status:
         sys.exit(task_command("status"))
 
-    # Guided dialogs: double-click flow only. The scheduled task runs with
+    # Console prompts: double-click flow only. The scheduled task runs with
     # --no-browser, so it can never pop a dialog from the background.
     if (
         os.name == "nt"

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MHT Viewer Localhost Server v1.15
+MHT Viewer Localhost Server v1.16
 Companion to the "MHT Viewer" userscript v7.1+.
 
 Protocol:
@@ -48,7 +48,7 @@ TASK_NAME = "MHTViewerServer"
 MAX_STORED = 50
 MAX_AGE_SEC = 60 * 60
 MAX_BODY = 256 * 1024 * 1024
-SERVER_VERSION = "1.15"
+SERVER_VERSION = "1.16"
 
 store = OrderedDict()
 store_lock = threading.Lock()
@@ -307,12 +307,12 @@ def _box_width(rows):
 
 def print_banner_head():
     """WHAT/HOW/WHY box. Prints FIRST at startup (no port known yet) so the
-    user knows what this thing is before any question is asked."""
-    if sys.platform == "win32":
-        try:
-            os.system("")  # enable ANSI escape processing
-        except OSError:
-            pass
+    user knows what this thing is before any question is asked.
+
+    NOTE: never spawn a child process here — this runs on the task path,
+    where the parent is windowless and ANY child console flashes every
+    minute (found live 2026-09-24). VT enabling lives in _tui_vt()
+    (SetConsoleMode, no child process)."""
     box, pal = _tui_setup()
     title = f"MHT Viewer Localhost Server v{SERVER_VERSION}"
     items = [

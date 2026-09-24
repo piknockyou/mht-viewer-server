@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MHT Viewer Localhost Server v1.2
+MHT Viewer Localhost Server v1.3
 Companion to the "MHT Viewer" userscript v7.0+.
 
 Protocol:
@@ -273,18 +273,29 @@ def _find_ours(host, ports):
 
     An open port alone proves nothing (could be anyone's occupier) —
     identity is the /health body this server returns.
+
+    Probed in parallel: on some Windows setups a closed loopback port hangs
+    the connect until timeout instead of refusing, so a sequential probe
+    costs timeout × ports (measured 8 s for 4 ports at timeout=2).
     """
     import http.client as _h
+    from concurrent.futures import ThreadPoolExecutor
 
-    for p in ports:
+    def _check(p):
         try:
-            c = _h.HTTPConnection(host, p, timeout=2)
+            c = _h.HTTPConnection(host, p, timeout=1)
             c.request("GET", "/health")
             r = c.getresponse()
             if r.status == 200 and r.read() == b"ok\n":
                 return p
         except OSError:
-            continue
+            pass
+        return None
+
+    with ThreadPoolExecutor(max_workers=len(ports)) as ex:
+        for hit in ex.map(_check, ports):
+            if hit is not None:
+                return hit
     return None
 
 
@@ -506,7 +517,38 @@ def _fix_stdio():
             setattr(sys, _name, _nul)
 
 
+def _relaunch_windowless():
+    """Re-run via pythonw when double-clicked on Windows. Returns True to exit.
+
+    `.py` double-click uses python.exe, which pops a black console for the
+    whole session. A no-argument launch is the double-click case, so hand it
+    to windowless pythonw and exit; the child continues into the dialogs.
+    Explicit CLI use (`--install-task`, `--probe`, … from a terminal) keeps
+    its console, since output is the point there.
+    """
+    if os.name != "nt" or len(sys.argv) > 1:
+        return False
+    if not sys.executable.lower().endswith("python.exe"):
+        return False
+    pythonw = sys.executable[: -len("python.exe")] + "pythonw.exe"
+    if not os.path.exists(pythonw):
+        return False
+    import subprocess as _sp
+
+    _sp.Popen(
+        [pythonw, os.path.abspath(__file__)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        creationflags=getattr(_sp, "DETACHED_PROCESS", 0),
+    )
+    return True
+
+
 def main():
+    if _relaunch_windowless():
+        return
     _fix_stdio()
     ap = argparse.ArgumentParser(description="MHT Viewer companion server")
     ap.add_argument("--host", default=DEFAULT_HOST)

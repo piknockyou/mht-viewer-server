@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MHT Viewer Localhost Server v1.7
+MHT Viewer Localhost Server v1.8
 Companion to the "MHT Viewer" userscript v7.0+.
 
 Protocol:
@@ -45,7 +45,7 @@ TASK_NAME = "MHTViewerServer"
 MAX_STORED = 50
 MAX_AGE_SEC = 60 * 60
 MAX_BODY = 256 * 1024 * 1024
-SERVER_VERSION = "1.6"
+SERVER_VERSION = "1.8"
 
 store = OrderedDict()
 store_lock = threading.Lock()
@@ -693,6 +693,26 @@ def _offer_background():
         pass
 
 
+def stop_server_cmd(host, ports):
+    """Non-interactive twin of the guided stop branch. Returns exit code.
+
+    The guided branch calls this too, so flag and menu walks print the
+    SAME strings for the same outcome (parity by construction).
+    """
+    found = _find_ours(host, ports)
+    if found is None:
+        print("No server listening.")
+        return 0
+    if _stop_server(host, found):
+        print("Server stopped.")
+        return 0
+    print(
+        "Could not stop it automatically (no pidfile - older or manual start).\n"
+        "Stop pythonw.exe via Task Manager."
+    )
+    return 1
+
+
 def guided_start(args):
     """Console double-click flow. Returns True to keep serving, False to exit."""
     print(f"MHT Viewer server - probing {args.host} ...")
@@ -701,13 +721,7 @@ def guided_start(args):
     if found:
         print(f"Server already running (port {found}).")
         if _ask_yn("Stop it?"):
-            if _stop_server(args.host, found):
-                print("Server stopped.")
-            else:
-                print(
-                    "Could not stop it automatically (no pidfile — older or manual start).\n"
-                    "Stop pythonw.exe via Task Manager."
-                )
+            stop_server_cmd(args.host, ports)
             return False
         if _task_installed():
             if _ask_yn("Auto-start is installed. Remove auto-start?"):
@@ -848,11 +862,23 @@ def main():
         help="print triage state (listening server? installed task?) and exit",
     )
     ap.add_argument(
+        "--stop-server",
+        action="store_true",
+        help="stop the running server (same outcome as answering Stop-it? with y) and exit",
+    )
+    ap.add_argument(
+        "--hide",
+        action="store_true",
+        help="hide our own console window after starting (implies --no-dialogs; stop later with --stop-server)",
+    )
+    ap.add_argument(
         "--no-dialogs",
         action="store_true",
         help="never prompt (console questions or fallback dialog; also implied by --no-browser)",
     )
     args = ap.parse_args()
+    if args.hide:
+        args.no_dialogs = True
 
     if args.probe:
         found = _find_ours(
@@ -874,6 +900,13 @@ def main():
         sys.exit(task_command("remove"))
     if args.task_status:
         sys.exit(task_command("status"))
+    if args.stop_server:
+        sys.exit(
+            stop_server_cmd(
+                args.host,
+                [args.port] + [p for p in PORT_FALLBACKS if p != args.port],
+            )
+        )
 
     # Banner head first: the user learns what this is BEFORE any question.
     print_banner_head()
@@ -908,6 +941,19 @@ def main():
 
     if not args.no_dialogs:
         _offer_background()
+
+    if args.hide:
+        if _own_console():
+            print(
+                "Running in background - hiding this window. Stop it later with --stop-server."
+            )
+            sys.stdout.flush()
+            try:
+                _hide_console_window()
+            except OSError:
+                pass
+        else:
+            print("No private console - staying visible.")
 
     if not args.no_browser:
         threading.Timer(0.4, lambda: webbrowser.open(base_url)).start()

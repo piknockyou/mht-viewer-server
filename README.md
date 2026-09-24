@@ -37,6 +37,8 @@ WHAT/HOW/WHY banner explaining what the server is for.
 | `python mht-viewer-server.py --install-task` | Windows Scheduled Task: start at logon, heal every minute |
 | `python mht-viewer-server.py --task-status` | Show whether the task is installed |
 | `python mht-viewer-server.py --remove-task` | Remove the task |
+| `python mht-viewer-server.py --stop-server` | Stop the running server (same as answering "Stop it?" with y) |
+| `python mht-viewer-server.py --hide --no-browser` | Start windowless-ish: hide own console, no questions, no browser tab |
 | `python mht-viewer-server.py --probe` | Print triage state (listening server? installed task?) |
 | `python mht-viewer-server.py --port 8090 --save ./saved --no-browser` | Custom port, archive uploads, no browser tab |
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-MHT Viewer Localhost Server v1.13
-Companion to the "MHT Viewer" userscript v7.0+.
+MHT Viewer Localhost Server v1.14
+Companion to the "MHT Viewer" userscript v7.1+.
 
 Protocol:
     POST /upload   Content-Type: text/html   → 200 "http://127.0.0.1:PORT/view/<id>\n"
@@ -10,12 +10,15 @@ Protocol:
     GET  /                                  → 200 status page
     OPTIONS *                               → 204 CORS preflight
 
+Only one copy runs at a time (a second start exits quietly); the menu
+and --stop-server stop every running copy.
+
 Usage:
     python mht-viewer-server.py
     python mht-viewer-server.py --port 8090 --save ./saved --no-browser
 
-    # Double-click (Windows): the console narrates each step and asks y/n.
-    # Pass --no-dialogs to skip the questions.
+    # Double-click (Windows): banner + menu with live status and options.
+    # Pass --no-dialogs to skip the menu.
 
     # Keep it alive across reboots/kills (Windows): registers a Scheduled
     # Task that starts the server at logon and re-checks every minute.
@@ -45,7 +48,7 @@ TASK_NAME = "MHTViewerServer"
 MAX_STORED = 50
 MAX_AGE_SEC = 60 * 60
 MAX_BODY = 256 * 1024 * 1024
-SERVER_VERSION = "1.13"
+SERVER_VERSION = "1.14"
 
 store = OrderedDict()
 store_lock = threading.Lock()
@@ -367,6 +370,63 @@ def _pidfile(port):
     return os.path.join(tempfile.gettempdir(), f"mhtviewer-{port}.pid")
 
 
+# No console window for our own children, ever (CursorScribe lesson: a
+# task that flashes a console every minute is a bug, not a feature).
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+_DETACHED = getattr(subprocess, "DETACHED_PROCESS", 0)
+
+_singleton_handle = None
+
+
+def _singleton():
+    """True if this process owns the one-server lock (else exit quietly).
+
+    Only one server ever runs: Windows named mutex, POSIX lockfile, held
+    for the process lifetime (a crash releases it automatically). The loser
+    exits 0 — same spirit as the task's IgnoreNew. MHTV_ALLOW_MULTI=1
+    escapes for tests only.
+    """
+    global _singleton_handle
+    if os.environ.get("MHTV_ALLOW_MULTI"):
+        return True
+    if os.name == "nt":
+        try:
+            import ctypes as _c
+
+            h = _c.windll.kernel32.CreateMutexW(None, True, "Local\\MHTViewerServer")
+            if not h:
+                return False
+            if _c.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+                _c.windll.kernel32.CloseHandle(h)
+                return False
+            _singleton_handle = h
+            return True
+        except OSError:
+            return False
+    try:
+        import fcntl as _f
+        import tempfile as _t
+
+        fh = open(os.path.join(_t.gettempdir(), "mhtviewer-single.lock"), "w")
+        _f.flock(fh.fileno(), _f.LOCK_EX | _f.LOCK_NB)
+        _singleton_handle = fh
+        return True
+    except OSError:
+        return False
+
+
+def _pythonw():
+    """Windowless interpreter next to this one, else this one."""
+    exe = sys.executable
+    if os.name == "nt" and exe.lower().endswith("python.exe"):
+        from pathlib import Path as _P
+
+        cand = _P(exe).with_name("pythonw.exe")
+        if cand.exists():
+            return str(cand)
+    return exe
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     server_version = "MHTViewerServer/1.0"
     protocol_version = "HTTP/1.1"
@@ -581,8 +641,8 @@ def bind_first_free(host, port):
     sys.exit(1)
 
 
-def _find_ours(host, ports, verbose=False):
-    """Port where OUR server answers /health, or None.
+def _find_all_ours(host, ports, verbose=False):
+    """Every port where OUR server answers /health, in port order.
 
     An open port alone proves nothing (could be anyone's occupier) —
     identity is the /health body this server returns.
@@ -611,10 +671,13 @@ def _find_ours(host, ports, verbose=False):
         return None
 
     with ThreadPoolExecutor(max_workers=len(ports)) as ex:
-        for hit in ex.map(_check, ports):
-            if hit is not None:
-                return hit
-    return None
+        return [hit for hit in ex.map(_check, ports) if hit is not None]
+
+
+def _find_ours(host, ports, verbose=False):
+    """First port where OUR server answers /health, or None."""
+    hits = _find_all_ours(host, ports, verbose=verbose)
+    return hits[0] if hits else None
 
 
 def _stop_server(host, port):
@@ -636,6 +699,7 @@ def _stop_server(host, port):
             ["taskkill", "/PID", str(pid), "/F"],
             capture_output=True,
             check=False,
+            creationflags=_NO_WINDOW,
         )
     else:
         try:
@@ -678,23 +742,29 @@ def _own_console():
 
 
 def stop_server_cmd(host, ports):
-    """Non-interactive twin of the guided stop branch. Returns exit code.
+    """Stop EVERY running copy of our server. Returns exit code.
 
-    The guided branch calls this too, so flag and menu walks print the
-    SAME strings for the same outcome (parity by construction).
+    The menu and --stop-server share this, so flag and menu walks print the
+    SAME lines for the same outcome (parity by construction). One server is
+    the norm (singleton); the sweep still clears strays from older builds.
     """
-    found = _find_ours(host, ports)
-    if found is None:
+    hits = _find_all_ours(host, ports)
+    if not hits:
         print("No server listening.")
         return 0
-    if _stop_server(host, found):
-        print("Server stopped.")
-        return 0
-    print(
-        "Could not stop it automatically (no pidfile - older or manual start).\n"
-        "Stop pythonw.exe via Task Manager."
-    )
-    return 1
+    failed = False
+    for port in hits:
+        if _stop_server(host, port):
+            print(f"Port {port}: server stopped.")
+        else:
+            print(
+                f"Port {port}: could not stop automatically "
+                "(no pidfile - older or manual start)."
+            )
+            failed = True
+    if failed:
+        print("Stop pythonw.exe via Task Manager for the leftovers.")
+    return 1 if failed else 0
 
 
 def _clear_screen():
@@ -710,17 +780,13 @@ def spawn_server(args):
     """Start the server as a detached background child. Returns its Popen.
 
     The menu process never serves: this child (windowless pythonw where
-    available, stdio silenced) is the server. It survives menu exit.
+    available, stdio silenced, no window ever) is the server. It survives
+    menu exit.
     """
     import subprocess as _sp
 
-    exe = sys.executable
-    if os.name == "nt" and exe.lower().endswith("python.exe"):
-        windowless = exe[: -len("python.exe")] + "pythonw.exe"
-        if os.path.exists(windowless):
-            exe = windowless
     cmd = [
-        exe,
+        _pythonw(),
         os.path.abspath(__file__),
         "--no-browser",
         "--no-dialogs",
@@ -735,7 +801,7 @@ def spawn_server(args):
         stdout=_sp.DEVNULL,
         stderr=_sp.DEVNULL,
         close_fds=True,
-        creationflags=getattr(_sp, "DETACHED_PROCESS", 0),
+        creationflags=_DETACHED | _NO_WINDOW,
     )
 
 
@@ -828,12 +894,11 @@ def launcher_menu(args):
 def _task_ps1(action):
     """PowerShell text for scheduled-task install/remove (Windows only)."""
     script = os.path.abspath(__file__)
-    pythonw = sys.executable.replace("python.exe", "pythonw.exe")
-    if not os.path.exists(pythonw):
-        pythonw = sys.executable
+    pythonw = _pythonw()
     if action == "install":
         # AtLogOn + 1-minute repetition heals kills/reboots within a minute.
         # MultipleInstances IgnoreNew keeps a running server untouched.
+        # RestartCount heals crashes silently on top (CursorScribe lesson).
         return (
             f"$a = New-ScheduledTaskAction -Execute '{pythonw}' "
             f"-Argument '\"{script}\" --no-browser'\n"
@@ -844,7 +909,8 @@ def _task_ps1(action):
             "$s = New-ScheduledTaskSettingsSet "
             "-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries "
             "-StartWhenAvailable -MultipleInstances IgnoreNew "
-            "-ExecutionTimeLimit ([TimeSpan]::Zero)\n"
+            "-ExecutionTimeLimit ([TimeSpan]::Zero) "
+            "-RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)\n"
             f'Register-ScheduledTask -TaskName "{TASK_NAME}" '
             "-Action $a -Trigger $l, $r -Settings $s -Force | Out-Null\n"
             f'Start-ScheduledTask -TaskName "{TASK_NAME}"\n'
@@ -869,6 +935,7 @@ def task_command(action, quiet=False):
             capture_output=True,
             text=True,
             check=False,
+            creationflags=_NO_WINDOW,
         )
         if not quiet:
             print(r.stdout if r.returncode == 0 else f"Task {TASK_NAME}: not installed")
@@ -885,7 +952,9 @@ def task_command(action, quiet=False):
 
         if shutil.which("gsudo"):
             cmd = ["gsudo"] + cmd
-        r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        r = subprocess.run(
+            cmd, capture_output=True, text=True, check=False, creationflags=_NO_WINDOW
+        )
     finally:
         try:
             os.unlink(ps1)
@@ -999,6 +1068,10 @@ def main():
 
     global SAVE_DIR
     SAVE_DIR = args.save
+
+    if not _singleton():
+        print("Another copy is already running - this one exits.")
+        sys.exit(0)
 
     srv, port = bind_first_free(args.host, args.port)
     if port != args.port:

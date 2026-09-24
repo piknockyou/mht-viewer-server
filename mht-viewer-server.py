@@ -29,16 +29,16 @@ Usage:
 
 import argparse
 import http.server
+import os
 import socketserver
 import subprocess
-import threading
-import uuid
-import time
 import sys
-import os
+import threading
+import time
+import uuid
 import webbrowser
-from urllib.parse import urlparse
 from collections import OrderedDict
+from urllib.parse import urlparse
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8081
@@ -253,7 +253,7 @@ def _render_box(items, width, box, pal):
     """One renderer for every banner line. items: ("title"|"label"|"row"|
     ("status", label, value[, color-override])|"blank"|"sep", text).
     Returns one string."""
-    bord, title_c, label_c, value_c, good_c, bad_c, reset = pal
+    bord, title_c, label_c, value_c, _good_c, _bad_c, reset = pal
     inner = width - 2 * _TUI_PAD
     top = bord + box["TL"] + box["H"] * width + box["BR"] + reset
     sep = bord + box["LT"] + box["H"] * width + box["RT"] + reset
@@ -518,7 +518,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if entry is None:
                     self._text(404, "Not found or expired.\n")
                     return
-                data, ts, meta = entry
+                data, _ts, _meta = entry
                 store.move_to_end(key)
             self._send(200, data, "text/html; charset=utf-8")
             return
@@ -623,7 +623,7 @@ HTML here; a new tab will open automatically.</p>
         msg = fmt % args
         if " 404 " in msg or " 405 " in msg:
             return
-        sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), msg))
+        sys.stderr.write(f"[{self.log_date_time_string()}] {msg}\n")
 
 
 class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -678,7 +678,7 @@ def _find_all_ours(host, ports, verbose=False):
 
     Probed in parallel: on some Windows setups a closed loopback port hangs
     the connect until timeout instead of refusing, so a sequential probe
-    costs timeout × ports (measured 8 s for 4 ports at timeout=2).
+    costs timeout x ports (measured 8 s for 4 ports at timeout=2).
     """
     import http.client as _h
     from concurrent.futures import ThreadPoolExecutor
@@ -1031,7 +1031,7 @@ def task_command(action, quiet=False):
         import shutil
 
         if shutil.which("gsudo"):
-            cmd = ["gsudo"] + cmd
+            cmd = ["gsudo", *cmd]
         r = subprocess.run(
             cmd, capture_output=True, text=True, check=False, creationflags=_NO_WINDOW
         )
@@ -1062,7 +1062,7 @@ def _fix_stdio():
             except (OSError, ValueError, AttributeError):
                 _broken = True
         if _broken:
-            _nul = open(os.devnull, "w")  # noqa: SIM115 — process-lifetime handle
+            _nul = open(os.devnull, "w")
             setattr(sys, _name, _nul)
 
 

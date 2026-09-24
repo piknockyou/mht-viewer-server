@@ -1,7 +1,6 @@
 # mht-viewer-server
 
-Companion localhost server for the **[MHT Viewer](https://greasyfork.org/)** userscript
-(GreasyFork link TBD — owner will paste the script URL here).
+Companion localhost server for the **[MHT Viewer](https://greasyfork.org/en/scripts/597235-mht-viewer)** userscript.
 
 ## When do you need this?
 

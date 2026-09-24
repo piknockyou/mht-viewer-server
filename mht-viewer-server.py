@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MHT Viewer Localhost Server v1.14
+MHT Viewer Localhost Server v1.15
 Companion to the "MHT Viewer" userscript v7.1+.
 
 Protocol:
@@ -48,7 +48,7 @@ TASK_NAME = "MHTViewerServer"
 MAX_STORED = 50
 MAX_AGE_SEC = 60 * 60
 MAX_BODY = 256 * 1024 * 1024
-SERVER_VERSION = "1.14"
+SERVER_VERSION = "1.15"
 
 store = OrderedDict()
 store_lock = threading.Lock()
@@ -368,6 +368,35 @@ def _pidfile(port):
     import tempfile
 
     return os.path.join(tempfile.gettempdir(), f"mhtviewer-{port}.pid")
+
+
+def _stop_marker():
+    import tempfile
+
+    return os.path.join(tempfile.gettempdir(), "mhtviewer-stopped")
+
+
+def _stop_requested():
+    """True when the user stopped via menu (stay dead until manual start)."""
+    return os.path.exists(_stop_marker())
+
+
+def _request_stop():
+    """Leave the stop-sign so task runs stay dead. Never raises."""
+    try:
+        with open(_stop_marker(), "w", encoding="utf-8") as f:
+            f.write("stopped\n")
+    except OSError:
+        pass
+
+
+def _clear_stop():
+    """Delete the stop-sign (manual start / install / remove). Never raises."""
+    try:
+        if os.path.exists(_stop_marker()):
+            os.remove(_stop_marker())
+    except OSError:
+        pass
 
 
 # No console window for our own children, ever (CursorScribe lesson: a
@@ -844,6 +873,15 @@ def launcher_menu(args):
             if found:
                 print(f"Already running on port {found} - nothing to start.")
                 continue
+            _clear_stop()  # manual start lifts any stay-dead marker
+            if installed and needs_heal():
+                print("Task action drifted (interpreter renewed?) - reinstalling ...")
+                heal_ok = task_command("install") == 0
+                print(
+                    "Auto-start healed."
+                    if heal_ok
+                    else "Heal failed - starting anyway."
+                )
             print("Starting server in the background ...")
             try:
                 spawn_server(args)
@@ -867,10 +905,9 @@ def launcher_menu(args):
             continue
         if choice == "2":
             stop_server_cmd(args.host, ports)
+            _request_stop()  # stays dead: task runs exit quietly until Start
             if _task_installed():
-                print(
-                    "Note: auto-start is installed - it will restart the server within a minute."
-                )
+                print("Stop-sign set: auto-start will NOT restart it. Start clears it.")
             continue
         if choice == "3":
             if installed:
@@ -901,7 +938,7 @@ def _task_ps1(action):
         # RestartCount heals crashes silently on top (CursorScribe lesson).
         return (
             f"$a = New-ScheduledTaskAction -Execute '{pythonw}' "
-            f"-Argument '\"{script}\" --no-browser'\n"
+            f"-Argument '\"{script}\" --no-browser --from-task'\n"
             "$l = New-ScheduledTaskTrigger -AtLogOn\n"
             "$r = New-ScheduledTaskTrigger -Once -At (Get-Date) "
             "-RepetitionInterval (New-TimeSpan -Minutes 1) "
@@ -921,6 +958,49 @@ def _task_ps1(action):
         f'Unregister-ScheduledTask -TaskName "{TASK_NAME}" '
         "-ErrorAction SilentlyContinue\n"
         f'Write-Host "Autostart removed: {TASK_NAME}"'
+    )
+
+
+def _desired_action():
+    exe = _pythonw()
+    return exe, f'"{os.path.abspath(__file__)}" --no-browser --from-task'
+
+
+def _current_action():
+    """(exe, args) the registered task would run, or None if missing."""
+    if os.name != "nt":
+        return None
+    try:
+        r = subprocess.run(
+            ["schtasks", "/query", "/tn", TASK_NAME, "/xml"],
+            capture_output=True,
+            text=True,
+            check=False,
+            creationflags=_NO_WINDOW,
+        )
+        if r.returncode != 0:
+            return None
+        import html as _h
+        import re as _re
+
+        exe = _re.search(r"<Command>(.*?)</Command>", r.stdout, _re.S)
+        arg = _re.search(r"<Arguments>(.*?)</Arguments>", r.stdout, _re.S)
+        if not exe:
+            return None
+        return exe.group(1).strip(), _h.unescape(arg.group(1).strip()) if arg else ""
+    except OSError:
+        return None
+
+
+def needs_heal():
+    """Task missing or its action drifted (uv renewed python, file moved)."""
+    cur = _current_action()
+    if not cur:
+        return True
+    want_exe, want_args = _desired_action()
+    return (
+        os.path.normcase(cur[0]) != os.path.normcase(want_exe)
+        or (cur[1] or "") != want_args
     )
 
 
@@ -992,6 +1072,11 @@ def main():
     ap.add_argument("--host", default=DEFAULT_HOST)
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument(
+        "--from-task",
+        action="store_true",
+        help="task launch: exit quietly while the menu stop-sign is set",
+    )
     ap.add_argument("--save", metavar="DIR", help="also write each upload to DIR")
     ap.add_argument(
         "--install-task",
@@ -1040,8 +1125,10 @@ def main():
         sys.exit(0 if found else 1)
 
     if args.install_task:
+        _clear_stop()  # keep-alive contradicts stay-dead
         sys.exit(task_command("install"))
     if args.remove_task:
+        _clear_stop()  # clean slate
         sys.exit(task_command("remove"))
     if args.task_status:
         sys.exit(task_command("status"))
@@ -1068,6 +1155,9 @@ def main():
 
     global SAVE_DIR
     SAVE_DIR = args.save
+
+    if args.from_task and _stop_requested():
+        sys.exit(0)  # user stopped via menu: stay dead, quietly
 
     if not _singleton():
         print("Another copy is already running - this one exits.")

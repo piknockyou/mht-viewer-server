@@ -29,8 +29,11 @@ a small menu, always with live status and all options — start, stop,
 install/remove auto-start, quit. Start launches the server detached in the
 background (this window is only the control panel — close it anytime).
 Only one copy ever runs (a second start exits quietly); stopping stops
-every copy. The task and all helpers run windowless — no console flashes,
-ever. Pass `--no-dialogs` to skip the menu. Colors appear on any Windows 10+
+every copy. **Stop means stop:** the menu sets a stop-sign so auto-start
+will NOT restart the server — only a manual Start lifts it. The task and
+all helpers run windowless — no console flashes, ever. The task action is
+checked for drift on Start (a renewed interpreter reinstalls it).
+Pass `--no-dialogs` to skip the menu. Colors appear on any Windows 10+
 console; the fancier Unicode box borders additionally need a UTF-8 codepage
 (`chcp 65001`) and a TrueType font (e.g. Consolas) — otherwise you get the
 same layout in plain ASCII.

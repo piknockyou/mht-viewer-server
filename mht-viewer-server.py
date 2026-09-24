@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MHT Viewer Localhost Server v1.5
+MHT Viewer Localhost Server v1.6
 Companion to the "MHT Viewer" userscript v7.0+.
 
 Protocol:
@@ -45,10 +45,257 @@ TASK_NAME = "MHTViewerServer"
 MAX_STORED = 50
 MAX_AGE_SEC = 60 * 60
 MAX_BODY = 256 * 1024 * 1024
+SERVER_VERSION = "1.6"
 
 store = OrderedDict()
 store_lock = threading.Lock()
 SAVE_DIR = None
+
+
+# ---- Minimal terminal UI (single-column banner box) ----
+# Single-column subset of the KB TUI reference: one renderer, runtime
+# unicode detection with an identical-geometry ASCII fallback, bg-aware
+# color (plain on light or unknown backgrounds), prose wrapped inside the
+# box. Console output stays ASCII unless Unicode is detected — a legacy
+# codepage renders box-drawing as mojibake otherwise (hit live in v1.4a).
+
+_TUI_MIN_W = 60
+_TUI_MAX_W = 68
+_TUI_PAD = 2
+
+_UNICODE_BOX = {
+    "TL": "┌",
+    "TR": "┐",
+    "BL": "└",
+    "BR": "┘",
+    "H": "─",
+    "V": "│",
+    "LT": "├",
+    "RT": "┤",
+}
+_ASCII_BOX = {
+    "TL": "+",
+    "TR": "+",
+    "BL": "+",
+    "BR": "+",
+    "H": "-",
+    "V": "|",
+    "LT": "+",
+    "RT": "+",
+}
+
+# (border, title, label, value, reset). Dark values are the KB §10.4
+# WCAG-checked palette; light values are checked against white.
+_DARK_PAL = (
+    "\033[38;5;243m",  # border subtle
+    "\033[1m\033[38;5;116m",  # title cyan bold
+    "\033[38;5;186m",  # labels yellow
+    "\033[38;5;114m",  # values green
+    "\033[0m",
+)
+_LIGHT_PAL = (
+    "\033[38;5;240m",  # border grey
+    "\033[1m\033[38;5;18m",  # title dark blue bold
+    "\033[38;5;94m",  # labels brown
+    "\033[38;5;22m",  # values dark green
+    "\033[0m",
+)
+_PLAIN_PAL = ("", "", "", "", "")
+
+# Approximate luminance of the 16 classic console colors, index = bg nibble.
+_CONSOLE_LUMA = (
+    0,
+    11,
+    92,
+    103,
+    27,
+    38,
+    119,
+    185,
+    69,
+    29,
+    182,
+    211,
+    54,
+    91,
+    227,
+    255,
+)
+
+
+def _tui_unicode():
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes as _c
+
+        return _c.windll.kernel32.GetConsoleOutputCP() == 65001
+    except OSError:
+        return False
+
+
+def _tui_palette():
+    if sys.platform != "win32":
+        if os.environ.get("TERM") == "dumb":
+            return _PLAIN_PAL
+        return _DARK_PAL
+    try:
+        import ctypes as _c
+        import ctypes.wintypes as _w
+
+        class _COORD(_c.Structure):
+            _fields_ = [("X", _w.SHORT), ("Y", _w.SHORT)]
+
+        class _SMALL_RECT(_c.Structure):
+            _fields_ = [
+                ("Left", _w.SHORT),
+                ("Top", _w.SHORT),
+                ("Right", _w.SHORT),
+                ("Bottom", _w.SHORT),
+            ]
+
+        class _CSBI(_c.Structure):
+            _fields_ = [
+                ("dwSize", _COORD),
+                ("dwCursorPosition", _COORD),
+                ("wAttributes", _w.WORD),
+                ("srWindow", _SMALL_RECT),
+                ("dwMaximumWindowSize", _COORD),
+            ]
+
+        k = _c.windll.kernel32
+        h = k.GetStdHandle(-11)
+        info = _CSBI()
+        if not h or not k.GetConsoleScreenBufferInfo(h, _c.byref(info)):
+            return _PLAIN_PAL
+        bg = (info.wAttributes >> 4) & 0xF
+        if not _tui_unicode():
+            return _PLAIN_PAL
+        return _DARK_PAL if _CONSOLE_LUMA[bg] < 100 else _LIGHT_PAL
+    except OSError:
+        return _PLAIN_PAL
+
+
+def _tui_wrap(text, width):
+    words, cur, out = text.split(), "", []
+    for w in words:
+        cand = w if not cur else cur + " " + w
+        if len(cand) <= width:
+            cur = cand
+        else:
+            if cur:
+                out.append(cur)
+            cur = w
+    if cur:
+        out.append(cur)
+    return out or [""]
+
+
+def _tui_align(text, width, center=False):
+    if len(text) > width:
+        text = text[: width - 3] + "..." if width > 3 else text[:width]
+    if center:
+        left = (width - len(text)) // 2
+        return text.rjust(left + len(text)).ljust(width)
+    return text.ljust(width)
+
+
+def _render_box(items, width, box, pal):
+    """One renderer for every banner line. items: ("title"|"label"|"row"|
+    ("status", label, value)|"blank"|"sep", text). Returns one string."""
+    bord, title_c, label_c, value_c, reset = pal
+    inner = width - 2 * _TUI_PAD
+    top = bord + box["TL"] + box["H"] * width + box["BR"] + reset
+    sep = bord + box["LT"] + box["H"] * width + box["RT"] + reset
+    bot = bord + box["BL"] + box["H"] * width + box["BR"] + reset
+
+    def row(text, color=""):
+        t = _tui_align(text, inner)
+        return (
+            bord
+            + box["V"]
+            + reset
+            + " " * _TUI_PAD
+            + color
+            + t
+            + reset
+            + " " * _TUI_PAD
+            + bord
+            + box["V"]
+            + reset
+        )
+
+    lines = [top]
+    for kind, text in items:
+        if kind == "sep":
+            lines.append(sep)
+        elif kind == "blank":
+            lines.append(row(""))
+        elif kind == "title":
+            lines.append(row(_tui_align(text, inner, center=True), title_c))
+        elif kind == "label":
+            lines.append(row(text, label_c))
+        elif kind == "status":
+            label, value = text
+            lines.append(row(label.ljust(10) + "  " + value, value_c))
+        else:
+            for chunk in _tui_wrap(text, inner):
+                lines.append(row(chunk))
+    lines.append(bot)
+    return "\n".join(lines)
+
+
+def print_banner(host, port, save_dir):
+    """Startup banner: what this is, how a mail gets here, why the server
+    view exists — plus the status rows. All geometry from fixed rows."""
+    if sys.platform == "win32":
+        try:
+            os.system("")  # enable ANSI escape processing
+        except OSError:
+            pass
+    box = _UNICODE_BOX if _tui_unicode() else _ASCII_BOX
+    pal = _tui_palette()
+    base = f"http://{host}:{port}/"
+    fixed = [
+        f"MHT Viewer Localhost Server v{SERVER_VERSION}",
+        "Listening :  " + base,
+        "Upload    :  " + base + "upload",
+        "Health    :  " + base + "health",
+        f"TTL       :  {MAX_AGE_SEC // 60} min   Max stored: {MAX_STORED}",
+    ]
+    if save_dir:
+        fixed.append("Save to   :  " + save_dir)
+    width = max(_TUI_MIN_W, min(_TUI_MAX_W, max(len(x) for x in fixed) + 2 * _TUI_PAD))
+    items = [
+        ("title", fixed[0]),
+        ("sep", ""),
+        ("label", "WHAT"),
+        (
+            "row",
+            "Companion to the MHT Viewer userscript. Shows saved .mht mails as clean pages.",
+        ),
+        ("blank", ""),
+        ("label", "HOW"),
+        (
+            "row",
+            "Open any .mht in your browser. The script converts it, sends it here, and opens the view tab for you.",
+        ),
+        ("blank", ""),
+        ("label", "WHY A SERVER"),
+        (
+            "row",
+            "The instant Blob view is sandboxed: no extensions run on it. This serves a real http://127.0.0.1 page where SingleFile and other tools work.",
+        ),
+        ("sep", ""),
+        ("status", ("Listening", base)),
+        ("status", ("Upload", base + "upload")),
+        ("status", ("Health", base + "health")),
+        ("status", ("TTL", f"{MAX_AGE_SEC // 60} min   Max stored: {MAX_STORED}")),
+    ]
+    if save_dir:
+        items.append(("status", ("Save to", save_dir)))
+    items.append(("row", "Ctrl+C to stop."))
+    print(_render_box(items, width, box, pal), flush=True)
 
 
 def _pidfile(port):
@@ -637,17 +884,7 @@ def main():
         pass
 
     base_url = f"http://{args.host}:{port}/"
-    print("=" * 58)
-    print(" MHT Viewer Localhost Server")
-    print("=" * 58)
-    print(f" Listening :  {base_url}")
-    print(f" Upload    :  {base_url}upload")
-    print(f" Health    :  {base_url}health")
-    print(f" TTL       :  {MAX_AGE_SEC // 60} min   Max stored: {MAX_STORED}")
-    if SAVE_DIR:
-        print(f" Save to   :  {SAVE_DIR}")
-    print(" Ctrl+C to stop.")
-    print("=" * 58)
+    print_banner(args.host, port, SAVE_DIR)
     sys.stdout.flush()
 
     if not args.no_dialogs:

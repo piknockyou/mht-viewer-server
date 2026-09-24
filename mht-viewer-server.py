@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MHT Viewer Localhost Server v1.16
+MHT Viewer Localhost Server v1.17
 Companion to the "MHT Viewer" userscript v7.1+.
 
 Protocol:
@@ -48,7 +48,7 @@ TASK_NAME = "MHTViewerServer"
 MAX_STORED = 50
 MAX_AGE_SEC = 60 * 60
 MAX_BODY = 256 * 1024 * 1024
-SERVER_VERSION = "1.16"
+SERVER_VERSION = "1.17"
 
 store = OrderedDict()
 store_lock = threading.Lock()
@@ -834,6 +834,39 @@ def spawn_server(args):
     )
 
 
+def _launch(args, ports, installed):
+    """Fresh-start sequence shared by first start and confirmed restart.
+
+    Clears the stop-sign, heals a drifted task action, spawns the detached
+    server and waits for it to answer. Menu-only helper (never the task path).
+    """
+    _clear_stop()  # manual start lifts any stay-dead marker
+    if installed and needs_heal():
+        print("Task action drifted (interpreter renewed?) - reinstalling ...")
+        heal_ok = task_command("install") == 0
+        print("Auto-start healed." if heal_ok else "Heal failed - starting anyway.")
+    print("Starting server in the background ...")
+    try:
+        spawn_server(args)
+    except OSError as e:
+        print(f"Could not start it: {e}")
+        return
+    import time as _t
+
+    up = None
+    for _ in range(12):
+        _t.sleep(0.5)
+        up = _find_ours(args.host, ports)
+        if up is not None:
+            break
+    if up is None:
+        print("Server did not come up - ports busy?")
+        return
+    print_banner_status(args.host, up, args.save)
+    print("Running in the background. Close this window anytime -")
+    print("the server keeps serving. Re-run this file to stop it.")
+
+
 def launcher_menu(args):
     """Numbered menu loop. Banner + live status every iteration; all options
     always listed (unavailable ones explain why). Never serves — choice 1
@@ -860,7 +893,7 @@ def launcher_menu(args):
             )
         else:
             print(f"Auto-start: {bad_c}not installed{reset_c}")
-        print("[1] Start server")
+        print("[1] Start server (restart if running)")
         print("[2] Stop server")
         print("[3] Install auto-start")
         print("[4] Remove auto-start")
@@ -871,37 +904,33 @@ def launcher_menu(args):
             return False
         if choice == "1":
             if found:
-                print(f"Already running on port {found} - nothing to start.")
-                continue
-            _clear_stop()  # manual start lifts any stay-dead marker
-            if installed and needs_heal():
-                print("Task action drifted (interpreter renewed?) - reinstalling ...")
-                heal_ok = task_command("install") == 0
-                print(
-                    "Auto-start healed."
-                    if heal_ok
-                    else "Heal failed - starting anyway."
-                )
-            print("Starting server in the background ...")
-            try:
-                spawn_server(args)
-            except OSError as e:
-                print(f"Could not start it: {e}")
-                continue
-            import time as _t
-
-            up = None
-            for _ in range(12):
-                _t.sleep(0.5)
-                up = _find_ours(args.host, ports)
-                if up is not None:
-                    break
-            if up is None:
-                print("Server did not come up - ports busy?")
-                continue
-            print_banner_status(args.host, up, args.save)
-            print("Running in the background. Close this window anytime -")
-            print("the server keeps serving. Re-run this file to stop it.")
+                # Restart, not a second copy: the singleton would exit a
+                # fresh spawn quietly. Confirm first — the sweep wipes the
+                # live server's in-memory pages (open views 404).
+                try:
+                    ans = (
+                        input(
+                            f"Server is running on port {found} - restart it? [y/N]: "
+                        )
+                        .strip()
+                        .lower()
+                    )
+                except (OSError, EOFError, RuntimeError):
+                    continue
+                if ans not in ("y", "yes"):
+                    print("Kept running - nothing to start.")
+                    continue
+                print("Stopping the running copy ...")
+                stop_server_cmd(
+                    args.host, ports
+                )  # sweep only: never sets the stop-sign
+                if _find_ours(args.host, ports) is not None:
+                    # Still up (e.g. no pidfile) — it holds the singleton
+                    # lock, so a spawn would die quietly and we'd report the
+                    # OLD server as fresh. Abort instead.
+                    print("Could not stop it - leaving it alone.")
+                    continue
+            _launch(args, ports, installed)
             continue
         if choice == "2":
             stop_server_cmd(args.host, ports)

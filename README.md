@@ -28,6 +28,8 @@ Double-click works too on Windows: after the WHAT/HOW/WHY banner you get
 a small menu, always with live status and all options — start, stop,
 install/remove auto-start, quit. Start launches the server detached in the
 background (this window is only the control panel — close it anytime).
+If one is already running, Start asks before restarting it (a restart
+clears stored pages, so open view tabs 404).
 Only one copy ever runs (a second start exits quietly); stopping stops
 every copy. **Stop means stop:** the menu sets a stop-sign so auto-start
 will NOT restart the server — only a manual Start lifts it. The task and

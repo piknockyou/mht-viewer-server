@@ -52,6 +52,73 @@ same layout in plain ASCII.
 The userscript probes the ports in order, so a moved server keeps working
 with zero configuration.
 
+## Non-Windows keep-alive (systemd / launchd)
+
+Windows uses `--install-task` (Scheduled Task: logon + 1-minute heal).
+On Linux/macOS run the same flags under your platform's keeper —
+`--no-browser --no-dialogs` never prompts, so it is safe unattended.
+Replace `/path/to/mht-viewer-server.py` with the real path in both examples.
+
+### Linux (systemd user service)
+
+Save as `~/.config/systemd/user/mhtviewer.service`:
+
+```ini
+[Unit]
+Description=MHT Viewer localhost server
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /path/to/mht-viewer-server.py --no-browser --no-dialogs
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now mhtviewer
+systemctl --user status mhtviewer        # check
+journalctl --user -u mhtviewer -f        # logs
+```
+
+### macOS (launchd)
+
+Save as `~/Library/LaunchAgents/com.piknockyou.mhtviewer.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.piknockyou.mhtviewer</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/path/to/mht-viewer-server.py</string>
+    <string>--no-browser</string>
+    <string>--no-dialogs</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+</dict>
+</plist>
+```
+
+```sh
+launchctl load ~/Library/LaunchAgents/com.piknockyou.mhtviewer.plist
+launchctl unload -w ~/Library/LaunchAgents/com.piknockyou.mhtviewer.plist  # stop
+```
+
+No systemd/launchd? Cron fallback (reboot only, no crash-heal):
+`@reboot sleep 10; /usr/bin/python3 /path/to/mht-viewer-server.py --no-browser --no-dialogs`
+
 ## Notes
 
 - Listening address is always `127.0.0.1` (your own machine). Nothing leaves it.

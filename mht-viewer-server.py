@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MHT Viewer Localhost Server v1.9
+MHT Viewer Localhost Server v1.10
 Companion to the "MHT Viewer" userscript v7.0+.
 
 Protocol:
@@ -45,7 +45,7 @@ TASK_NAME = "MHTViewerServer"
 MAX_STORED = 50
 MAX_AGE_SEC = 60 * 60
 MAX_BODY = 256 * 1024 * 1024
-SERVER_VERSION = "1.9"
+SERVER_VERSION = "1.10"
 
 store = OrderedDict()
 store_lock = threading.Lock()
@@ -713,12 +713,26 @@ def stop_server_cmd(host, ports):
     return 1
 
 
+def _clear_screen():
+    """Viewport + scrollback clear (KB §3.2: replace, never append). Only for
+    our own console window — never wipe a shared terminal's scrollback."""
+    try:
+        print("\x1b[2J\x1b[3J\x1b[H", end="", flush=True)
+    except OSError:
+        pass
+
+
 def launcher_menu(args):
     """Numbered menu loop. Banner + live status every iteration; all options
     always listed (unavailable ones explain why). True = start serving now,
     False = quit leaving everything as it is."""
     ports = [args.port] + [p for p in PORT_FALLBACKS if p != args.port]
+    own = _own_console()
+    first = True
     while True:
+        if not first and own:
+            _clear_screen()
+        first = False
         print_banner_head()
         print(f"Probing {args.host} ...")
         found = _find_ours(args.host, ports, verbose=True)
@@ -938,16 +952,14 @@ def main():
         )
 
     # Banner head first: the user learns what this is BEFORE any question.
-    print_banner_head()
+    # The menu reprints it every round; the direct-serve path prints it once.
+    menu = os.name == "nt" and not args.no_browser and not args.no_dialogs
+    if not menu:
+        print_banner_head()
 
     # Launcher menu: double-click flow only. The scheduled task runs with
     # --no-browser, so it can never prompt from the background.
-    if (
-        os.name == "nt"
-        and not args.no_browser
-        and not args.no_dialogs
-        and not launcher_menu(args)
-    ):
+    if menu and not launcher_menu(args):
         sys.exit(0)
 
     global SAVE_DIR

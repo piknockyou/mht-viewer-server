@@ -26,8 +26,9 @@ python mht-viewer-server.py
 
 Double-click works too on Windows: the console narrates each step (which
 ports it probes, what it finds) and asks `y/n` questions — start now,
-auto-start, stop, remove. Run it again anytime to stop the server or change
-auto-start. Pass `--no-dialogs` to skip the questions.
+auto-start, stop, remove. After starting you may hide the window (server
+keeps running silently; run the file again and answer "Stop it?" to stop).
+Pass `--no-dialogs` to skip the questions.
 
 | Command | What it does |
 |---|---|

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MHT Viewer Localhost Server v1.4
+MHT Viewer Localhost Server v1.5
 Companion to the "MHT Viewer" userscript v7.0+.
 
 Protocol:
@@ -384,6 +384,52 @@ def _ask_yn(prompt, default=False):
     return ans in ("y", "yes")
 
 
+def _own_console():
+    """True if this process is the only one on its console (own window).
+
+    Double-click gives the script a console window of its own; a terminal
+    launch shares the terminal's console with the shell. Only the first
+    case may be hidden without stealing someone's terminal.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes as _c
+        import ctypes.wintypes as _w
+
+        _arr = (_w.DWORD * 64)()
+        return _c.windll.kernel32.GetConsoleProcessList(_arr, 64) == 1
+    except OSError:
+        return False
+
+
+def _free_console():
+    """Detach from our console window; the process keeps running headless."""
+    import ctypes as _c
+
+    _c.windll.kernel32.FreeConsole()
+
+
+def _offer_background():
+    """Offer to hide our own console window. States the deal up front."""
+    if not _own_console():
+        return
+    hide = _ask_yn(
+        "Hide this window? The server keeps running silently in the background. "
+        'To stop it later, run this file again and answer "Stop it?" with y',
+        default=False,
+    )
+    if not hide:
+        return
+    print("Running in background - this window closes now.")
+    sys.stdout.flush()
+    try:
+        _free_console()
+    except OSError:
+        pass
+    _fix_stdio()  # freed-console handles are dead; park streams on NUL
+
+
 def guided_start(args):
     """Console double-click flow. Returns True to keep serving, False to exit."""
     print(f"MHT Viewer server - probing {args.host} ...")
@@ -603,6 +649,9 @@ def main():
     print(" Ctrl+C to stop.")
     print("=" * 58)
     sys.stdout.flush()
+
+    if not args.no_dialogs:
+        _offer_background()
 
     if not args.no_browser:
         threading.Timer(0.4, lambda: webbrowser.open(base_url)).start()

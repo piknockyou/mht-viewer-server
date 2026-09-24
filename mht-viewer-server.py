@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MHT Viewer Localhost Server v1.8
+MHT Viewer Localhost Server v1.9
 Companion to the "MHT Viewer" userscript v7.0+.
 
 Protocol:
@@ -45,7 +45,7 @@ TASK_NAME = "MHTViewerServer"
 MAX_STORED = 50
 MAX_AGE_SEC = 60 * 60
 MAX_BODY = 256 * 1024 * 1024
-SERVER_VERSION = "1.8"
+SERVER_VERSION = "1.9"
 
 store = OrderedDict()
 store_lock = threading.Lock()
@@ -713,33 +713,62 @@ def stop_server_cmd(host, ports):
     return 1
 
 
-def guided_start(args):
-    """Console double-click flow. Returns True to keep serving, False to exit."""
-    print(f"MHT Viewer server - probing {args.host} ...")
+def launcher_menu(args):
+    """Numbered menu loop. Banner + live status every iteration; all options
+    always listed (unavailable ones explain why). True = start serving now,
+    False = quit leaving everything as it is."""
     ports = [args.port] + [p for p in PORT_FALLBACKS if p != args.port]
-    found = _find_ours(args.host, ports, verbose=True)
-    if found:
-        print(f"Server already running (port {found}).")
-        if _ask_yn("Stop it?"):
+    while True:
+        print_banner_head()
+        print(f"Probing {args.host} ...")
+        found = _find_ours(args.host, ports, verbose=True)
+        installed = _task_installed()
+        if found:
+            print(f"Server    : listening http://{args.host}:{found}/")
+        else:
+            print("Server    : not listening")
+        if installed:
+            print("Auto-start: installed (restarts the server if stopped)")
+        else:
+            print("Auto-start: not installed")
+        print("[1] Start server")
+        print("[2] Stop server")
+        print("[3] Install auto-start")
+        print("[4] Remove auto-start")
+        print("[5] Quit (leave everything as it is)")
+        try:
+            choice = input("Choice [1-5]: ").strip()
+        except (OSError, EOFError, RuntimeError):
+            return False
+        if choice == "1":
+            if found:
+                print(f"Already running on port {found} - nothing to start.")
+                continue
+            return True
+        if choice == "2":
             stop_server_cmd(args.host, ports)
-            return False
-        if _task_installed():
-            if _ask_yn("Auto-start is installed. Remove auto-start?"):
-                ok = task_command("remove") == 0
-                print("Auto-start removed." if ok else "Removal failed - see above.")
-            return False
-        if _ask_yn("Install auto-start (survives restarts)?"):
+            if _task_installed():
+                print(
+                    "Note: auto-start is installed - it will restart the server within a minute."
+                )
+            continue
+        if choice == "3":
+            if installed:
+                print("Auto-start is already installed.")
+                continue
             ok = task_command("install") == 0
             print("Auto-start installed." if ok else "Install failed - see above.")
-        return False
-    print("No server listening.")
-    if not _ask_yn("Start the server now?", default=True):
-        return False
-    if not _task_installed():
-        if _ask_yn("Install auto-start so the server survives restarts?"):
-            ok = task_command("install") == 0
-            print("Auto-start installed." if ok else "Install failed - see above.")
-    return True
+            continue
+        if choice == "4":
+            if not installed:
+                print("Auto-start is not installed.")
+                continue
+            ok = task_command("remove") == 0
+            print("Auto-start removed." if ok else "Removal failed - see above.")
+            continue
+        if choice == "5":
+            return False
+        print("Pick 1-5.")
 
 
 def _task_ps1(action):
@@ -911,13 +940,13 @@ def main():
     # Banner head first: the user learns what this is BEFORE any question.
     print_banner_head()
 
-    # Console prompts: double-click flow only. The scheduled task runs with
-    # --no-browser, so it can never pop a dialog from the background.
+    # Launcher menu: double-click flow only. The scheduled task runs with
+    # --no-browser, so it can never prompt from the background.
     if (
         os.name == "nt"
         and not args.no_browser
         and not args.no_dialogs
-        and not guided_start(args)
+        and not launcher_menu(args)
     ):
         sys.exit(0)
 

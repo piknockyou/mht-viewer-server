@@ -24,8 +24,9 @@ Standard library only — no `pip install` anything (Python 3.7+).
 python mht-viewer-server.py
 ```
 
-Double-click works too on Windows: a dialog asks whether to start now and
-whether to install auto-start. Run it again anytime to stop or remove
+Double-click works too on Windows: the console narrates each step (which
+ports it probes, what it finds) and asks `y/n` questions — start now,
+auto-start, stop, remove. Run it again anytime to stop the server or change
 auto-start. Pass `--no-dialogs` to skip the questions.
 
 | Command | What it does |

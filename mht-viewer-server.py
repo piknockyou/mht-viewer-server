@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MHT Viewer Localhost Server v1.12
+MHT Viewer Localhost Server v1.13
 Companion to the "MHT Viewer" userscript v7.0+.
 
 Protocol:
@@ -45,7 +45,7 @@ TASK_NAME = "MHTViewerServer"
 MAX_STORED = 50
 MAX_AGE_SEC = 60 * 60
 MAX_BODY = 256 * 1024 * 1024
-SERVER_VERSION = "1.12"
+SERVER_VERSION = "1.13"
 
 store = OrderedDict()
 store_lock = threading.Lock()
@@ -171,11 +171,10 @@ def _tui_vt():
     return ok
 
 
-def _tui_palette():
-    if not _tui_vt():
-        return _PLAIN_PAL
+def _tui_console_bg():
+    """Console background color nibble, or None (no console / failure)."""
     if sys.platform != "win32":
-        return _DARK_PAL
+        return None
     try:
         import ctypes as _c
         import ctypes.wintypes as _w
@@ -204,13 +203,23 @@ def _tui_palette():
         h = k.GetStdHandle(-11)
         info = _CSBI()
         if not h or not k.GetConsoleScreenBufferInfo(h, _c.byref(info)):
-            return _PLAIN_PAL
-        bg = (info.wAttributes >> 4) & 0xF
-        if not _tui_unicode():
-            return _PLAIN_PAL
-        return _DARK_PAL if _CONSOLE_LUMA[bg] < 100 else _LIGHT_PAL
+            return None
+        return (info.wAttributes >> 4) & 0xF
     except OSError:
+        return None
+
+
+def _tui_palette():
+    # Gated on VT processing ONLY — box-drawing stays on the codepage gate,
+    # but colors work with the ASCII box on legacy codepages.
+    if not _tui_vt():
         return _PLAIN_PAL
+    if sys.platform != "win32":
+        return _DARK_PAL
+    bg = _tui_console_bg()
+    if bg is None:
+        return _PLAIN_PAL
+    return _DARK_PAL if _CONSOLE_LUMA[bg] < 100 else _LIGHT_PAL
 
 
 def _tui_wrap(text, width):

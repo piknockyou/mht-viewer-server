@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MHT Viewer Localhost Server v1.11
+MHT Viewer Localhost Server v1.12
 Companion to the "MHT Viewer" userscript v7.0+.
 
 Protocol:
@@ -45,7 +45,7 @@ TASK_NAME = "MHTViewerServer"
 MAX_STORED = 50
 MAX_AGE_SEC = 60 * 60
 MAX_BODY = 256 * 1024 * 1024
-SERVER_VERSION = "1.11"
+SERVER_VERSION = "1.12"
 
 store = OrderedDict()
 store_lock = threading.Lock()
@@ -84,13 +84,15 @@ _ASCII_BOX = {
     "RT": "+",
 }
 
-# (border, title, label, value, reset). Dark values are the KB §10.4
-# WCAG-checked palette; light values are checked against white.
+# (border, title, label, value, good, bad, reset). Dark values are the
+# KB §10.4 WCAG-checked palette; light values are checked against white.
 _DARK_PAL = (
     "\033[38;5;243m",  # border subtle
     "\033[1m\033[38;5;116m",  # title cyan bold
     "\033[38;5;186m",  # labels yellow
     "\033[38;5;114m",  # values green
+    "\033[38;5;114m",  # good (active) green
+    "\033[38;5;203m",  # bad (inactive) red
     "\033[0m",
 )
 _LIGHT_PAL = (
@@ -98,9 +100,15 @@ _LIGHT_PAL = (
     "\033[1m\033[38;5;18m",  # title dark blue bold
     "\033[38;5;94m",  # labels brown
     "\033[38;5;22m",  # values dark green
+    "\033[38;5;22m",  # good (active) dark green
+    "\033[38;5;124m",  # bad (inactive) dark red
     "\033[0m",
 )
-_PLAIN_PAL = ("", "", "", "", "")
+_PLAIN_PAL = ("", "", "", "", "", "", "")
+
+# SetConsoleMode flag that makes ANSI escapes work on modern conhost.
+_ENABLE_VT = 0x0004
+_tui_vt_cache = None
 
 # Approximate luminance of the 16 classic console colors, index = bg nibble.
 _CONSOLE_LUMA = (
@@ -134,10 +142,39 @@ def _tui_unicode():
         return False
 
 
+def _tui_vt():
+    """True if the console processes ANSI escapes. Enables VT mode on
+    Windows conhost (cached); codepage 65001 alone does NOT imply this."""
+    global _tui_vt_cache
+    if _tui_vt_cache is not None:
+        return _tui_vt_cache
+    ok = True
+    if sys.platform == "win32":
+        ok = False
+        try:
+            import ctypes as _c
+            import ctypes.wintypes as _w
+
+            k = _c.windll.kernel32
+            h = k.GetStdHandle(-11)
+            mode = _w.DWORD()
+            if h and k.GetConsoleMode(h, _c.byref(mode)):
+                if mode.value & _ENABLE_VT or k.SetConsoleMode(
+                    h, mode.value | _ENABLE_VT
+                ):
+                    ok = True
+        except OSError:
+            ok = False
+    elif os.environ.get("TERM") == "dumb":
+        ok = False
+    _tui_vt_cache = ok
+    return ok
+
+
 def _tui_palette():
+    if not _tui_vt():
+        return _PLAIN_PAL
     if sys.platform != "win32":
-        if os.environ.get("TERM") == "dumb":
-            return _PLAIN_PAL
         return _DARK_PAL
     try:
         import ctypes as _c
@@ -202,8 +239,9 @@ def _tui_align(text, width, center=False):
 
 def _render_box(items, width, box, pal):
     """One renderer for every banner line. items: ("title"|"label"|"row"|
-    ("status", label, value)|"blank"|"sep", text). Returns one string."""
-    bord, title_c, label_c, value_c, reset = pal
+    ("status", label, value[, color-override])|"blank"|"sep", text).
+    Returns one string."""
+    bord, title_c, label_c, value_c, good_c, bad_c, reset = pal
     inner = width - 2 * _TUI_PAD
     top = bord + box["TL"] + box["H"] * width + box["BR"] + reset
     sep = bord + box["LT"] + box["H"] * width + box["RT"] + reset
@@ -236,8 +274,9 @@ def _render_box(items, width, box, pal):
         elif kind == "label":
             lines.append(row(text, label_c))
         elif kind == "status":
-            label, value = text
-            lines.append(row(label.ljust(10) + "  " + value, value_c))
+            label, value = text[0], text[1]
+            color = text[2] if len(text) > 2 else value_c
+            lines.append(row(label.ljust(10) + "  " + value, color))
         else:
             for chunk in _tui_wrap(text, inner):
                 lines.append(row(chunk))
@@ -291,6 +330,7 @@ def print_banner_head():
 def print_banner_status(host, port, save_dir):
     """Status box. Prints AFTER the bind, so the port is the real one."""
     box, pal = _tui_setup()
+    good_c = pal[4]
     base = f"http://{host}:{port}/"
     fixed = [
         "Listening :  " + base,
@@ -301,7 +341,7 @@ def print_banner_status(host, port, save_dir):
     if save_dir:
         fixed.append("Save to   :  " + save_dir)
     items = [
-        ("status", ("Listening", base)),
+        ("status", ("Listening", base, good_c)),
         ("status", ("Upload", base + "upload")),
         ("status", ("Health", base + "health")),
         ("status", ("TTL", f"{MAX_AGE_SEC // 60} min   Max stored: {MAX_STORED}")),
@@ -696,6 +736,7 @@ def launcher_menu(args):
     spawns a detached server; quitting leaves everything as it is."""
     ports = [args.port] + [p for p in PORT_FALLBACKS if p != args.port]
     own = _own_console()
+    _, _, _, _, good_c, bad_c, reset_c = _tui_palette()
     first = True
     while True:
         if not first and own:
@@ -706,13 +747,15 @@ def launcher_menu(args):
         found = _find_ours(args.host, ports, verbose=True)
         installed = _task_installed()
         if found:
-            print(f"Server    : listening http://{args.host}:{found}/")
+            print(f"Server    : {good_c}listening{reset_c} http://{args.host}:{found}/")
         else:
-            print("Server    : not listening")
+            print(f"Server    : {bad_c}not listening{reset_c}")
         if installed:
-            print("Auto-start: installed (restarts the server if stopped)")
+            print(
+                f"Auto-start: {good_c}installed{reset_c} (restarts the server if stopped)"
+            )
         else:
-            print("Auto-start: not installed")
+            print(f"Auto-start: {bad_c}not installed{reset_c}")
         print("[1] Start server")
         print("[2] Stop server")
         print("[3] Install auto-start")

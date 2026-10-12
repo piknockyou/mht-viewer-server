@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MHT Viewer Localhost Server v1.17
+MHT Viewer Localhost Server v1.18
 Companion to the "MHT Viewer" userscript v7.1+.
 
 Protocol:
@@ -48,7 +48,7 @@ TASK_NAME = "MHTViewerServer"
 MAX_STORED = 50
 MAX_AGE_SEC = 60 * 60
 MAX_BODY = 256 * 1024 * 1024
-SERVER_VERSION = "1.17"
+SERVER_VERSION = "1.18"
 
 store = OrderedDict()
 store_lock = threading.Lock()
@@ -1000,10 +1000,13 @@ def _current_action():
     if os.name != "nt":
         return None
     try:
+        # schtasks prints in the OEM code page; decode leniently (a strict cp1252 decode crashes on umlauts).
         r = subprocess.run(
             ["schtasks", "/query", "/tn", TASK_NAME, "/xml"],
             capture_output=True,
             text=True,
+            encoding="oem",
+            errors="replace",
             check=False,
             creationflags=_NO_WINDOW,
         )
@@ -1043,6 +1046,8 @@ def task_command(action, quiet=False):
             ["schtasks", "/query", "/tn", TASK_NAME, "/fo", "LIST"],
             capture_output=True,
             text=True,
+            encoding="oem",
+            errors="replace",
             check=False,
             creationflags=_NO_WINDOW,
         )
@@ -1062,7 +1067,13 @@ def task_command(action, quiet=False):
         if shutil.which("gsudo"):
             cmd = ["gsudo", *cmd]
         r = subprocess.run(
-            cmd, capture_output=True, text=True, check=False, creationflags=_NO_WINDOW
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="oem",
+            errors="replace",
+            check=False,
+            creationflags=_NO_WINDOW,
         )
     finally:
         try:

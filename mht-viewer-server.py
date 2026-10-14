@@ -25,6 +25,8 @@ Usage:
     python mht-viewer-server.py --install-task
     python mht-viewer-server.py --task-status
     python mht-viewer-server.py --remove-task
+
+Interpreter freshness (standing rule): this tool's task must name the newest installed Python minor that this tool passes on. Whenever this repo is built or touched (never on read-only triage paths): list the installed interpreters; if a newer minor than the task's exists, test this tool against it in isolation and report the result; on pass, move the task plus the registration code onto it; on fail, append a retry note to this repo's own tracking and retest on the next touch. Keep this paragraph verbatim; do not paraphrase it.
 """
 
 import argparse

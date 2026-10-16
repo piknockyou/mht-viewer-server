@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-MHT Viewer Localhost Server v1.19
+MHT Viewer Localhost Server
 Companion to the "MHT Viewer" userscript v7.1+.
+
+Version lives in SERVER_VERSION only - the console banner and the HTTP
+Server header derive from it, so a release bump is a one-line edit.
 
 Protocol:
     POST /upload   Content-Type: text/html   → 200 "http://127.0.0.1:PORT/view/<id>\n"
@@ -57,6 +60,27 @@ import webbrowser
 from collections import OrderedDict
 from urllib.parse import urlparse
 
+# basedpyright: dynamic-typing noise from retrofitting a type checker onto an
+# unannotated 3.7-compatible single-file script. ty needs none of this and is
+# clean. Every rule that would signal a real defect stays ON and currently
+# reports zero: reportUnusedImport/Function/Variable/Parameter,
+# reportUndefinedVariable, reportMissingImports, reportUnreachable.
+#   reportUnusedCallResult - audited: all 30 sites are deliberate
+#     fire-and-forget side effects (file writes, wfile.send, subprocess.run
+#     with check=False, argparse add_argument, sys.stdout.flush).
+#   reportImplicitOverride - @override requires Python 3.12; this script
+#     supports 3.7+.
+# pyright: reportAny=false
+# pyright: reportUnknownArgumentType=false
+# pyright: reportUnknownVariableType=false
+# pyright: reportUnknownMemberType=false
+# pyright: reportUnknownParameterType=false
+# pyright: reportMissingParameterType=false
+# pyright: reportUnannotatedClassAttribute=false
+# pyright: reportUnusedCallResult=false
+# pyright: reportImplicitStringConcatenation=false
+# pyright: reportImplicitOverride=false
+
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8081
 # Ports the userscript probes in order — keep both lists in sync.
@@ -69,7 +93,7 @@ SERVER_VERSION = "1.19"
 
 store = OrderedDict()
 store_lock = threading.Lock()
-SAVE_DIR = None
+save_dir = None
 
 
 # ---- Minimal terminal UI (single-column banner box) ----
@@ -178,11 +202,15 @@ def _tui_vt():
             k = _c.windll.kernel32
             h = k.GetStdHandle(-11)
             mode = _w.DWORD()
-            if h and k.GetConsoleMode(h, _c.byref(mode)):
-                if mode.value & _ENABLE_VT or k.SetConsoleMode(
-                    h, mode.value | _ENABLE_VT
-                ):
-                    ok = True
+            if (
+                h
+                and k.GetConsoleMode(h, _c.byref(mode))
+                and (
+                    mode.value & _ENABLE_VT
+                    or k.SetConsoleMode(h, mode.value | _ENABLE_VT)
+                )
+            ):
+                ok = True
         except OSError:
             ok = False
     elif os.environ.get("TERM") == "dumb":
@@ -369,7 +397,7 @@ def print_banner_status(host, port, save_dir):
     ]
     if save_dir:
         fixed.append("Save to   :  " + save_dir)
-    items = [
+    items: list[tuple[str, object]] = [
         ("status", ("Listening", base, good_c)),
         ("status", ("Upload", base + "upload")),
         ("status", ("Health", base + "health")),
@@ -453,9 +481,12 @@ def _singleton():
         import fcntl as _f
         import tempfile as _t
 
-        fh = open(os.path.join(_t.gettempdir(), "mhtviewer-single.lock"), "w")
-        _f.flock(fh.fileno(), _f.LOCK_EX | _f.LOCK_NB)
-        _singleton_handle = fh
+        lock = os.path.join(_t.gettempdir(), "mhtviewer-single.lock")
+        file_handle = open(lock, "w")  # noqa: SIM115 - held open, see below
+        # Held for the process lifetime on purpose: closing this handle
+        # would release the flock, so a context manager is wrong here.
+        _f.flock(file_handle.fileno(), _f.LOCK_EX | _f.LOCK_NB)
+        _singleton_handle = file_handle
         return True
     except OSError:
         return False
@@ -474,7 +505,7 @@ def _pythonw():
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    server_version = "MHTViewerServer/1.0"
+    server_version = f"MHTViewerServer/{SERVER_VERSION}"
     protocol_version = "HTTP/1.1"
 
     def _cors(self):
@@ -567,20 +598,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             remaining -= len(chunk)
 
         key = uuid.uuid4().hex[:12]
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
         meta = {
             "size": len(body),
-            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "time": stamp,
             "ua": self.headers.get("User-Agent", "?")[:120],
         }
         with store_lock:
             store[key] = (body, time.time(), meta)
             self._prune()
 
-        if SAVE_DIR:
+        if save_dir:
             try:
-                os.makedirs(SAVE_DIR, exist_ok=True)
-                safe_time = meta["time"].replace(":", "-")
-                fp = os.path.join(SAVE_DIR, f"{safe_time}_{key}.html")
+                os.makedirs(save_dir, exist_ok=True)
+                safe_time = stamp.replace(":", "-")
+                fp = os.path.join(save_dir, f"{safe_time}_{key}.html")
                 with open(fp, "wb") as f:
                     f.write(body)
             except OSError as e:
@@ -636,8 +668,11 @@ HTML here; a new tab will open automatically.</p>
 </body></html>"""
         self._text(200, page, "text/html; charset=utf-8")
 
-    def log_message(self, fmt, *args):
-        msg = fmt % args
+    def log_message(self, format, *args):
+        # The parameter name is fixed by BaseHTTPRequestHandler (both type
+        # checkers verify the override against it); it shadows the builtin
+        # here, exactly as the stdlib's own signature does.
+        msg = format % args
         if " 404 " in msg or " 405 " in msg:
             return
         sys.stderr.write(f"[{self.log_date_time_string()}] {msg}\n")
@@ -665,7 +700,11 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
             pass
         self.socket.bind(self.server_address)
         host, port = self.server_address[:2]
-        self.server_name = _socket.getfqdn(host)
+        # server_address is typed str | bytes | bytearray; we always bind a
+        # str host (argparse), and getfqdn wants str - narrow, never cast.
+        self.server_name = _socket.getfqdn(
+            host if isinstance(host, str) else host.decode()
+        )
         self.server_port = port
 
 
@@ -1097,8 +1136,8 @@ def _current_action():
         import html as _h
         import re as _re
 
-        exe = _re.search(r"<Command>(.*?)</Command>", r.stdout, _re.S)
-        arg = _re.search(r"<Arguments>(.*?)</Arguments>", r.stdout, _re.S)
+        exe = _re.search(r"<Command>(.*?)</Command>", r.stdout, _re.DOTALL)
+        arg = _re.search(r"<Arguments>(.*?)</Arguments>", r.stdout, _re.DOTALL)
         if not exe:
             return None
         return exe.group(1).strip(), _h.unescape(arg.group(1).strip()) if arg else ""
@@ -1197,13 +1236,15 @@ def _fix_stdio():
     for _name in ("stdout", "stderr"):
         _stream = getattr(sys, _name, None)
         _broken = _stream is None
-        if not _broken:
+        if _stream is not None:
             try:
                 _stream.flush()
             except (OSError, ValueError, AttributeError):
                 _broken = True
         if _broken:
-            _nul = open(os.devnull, "w")
+            # Stays open for the process lifetime (it becomes sys.stdout /
+            # sys.stderr), so no context manager here either.
+            _nul = open(os.devnull, "w")  # noqa: SIM115
             setattr(sys, _name, _nul)
 
 
@@ -1336,8 +1377,8 @@ def main():
         launcher_menu(args)
         sys.exit(0)
 
-    global SAVE_DIR
-    SAVE_DIR = args.save
+    global save_dir
+    save_dir = args.save
 
     if args.from_task and _stop_requested():
         sys.exit(0)  # user stopped via menu: stay dead, quietly
@@ -1358,7 +1399,7 @@ def main():
         pass
 
     base_url = f"http://{args.host}:{port}/"
-    print_banner_status(args.host, port, SAVE_DIR)
+    print_banner_status(args.host, port, save_dir)
     sys.stdout.flush()
 
     if not args.no_browser:

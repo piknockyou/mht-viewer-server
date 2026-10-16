@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MHT Viewer Localhost Server v1.18
+MHT Viewer Localhost Server v1.19
 Companion to the "MHT Viewer" userscript v7.1+.
 
 Protocol:
@@ -10,15 +10,30 @@ Protocol:
     GET  /                                  → 200 status page
     OPTIONS *                               → 204 CORS preflight
 
-Only one copy runs at a time (a second start exits quietly); the menu
-and --stop-server stop every running copy.
+Only one copy runs at a time (a second start exits quietly); stopping
+stops every running copy.
+
+Stopping has two meanings, and both are reachable from the menu and from
+the flags. The CLI is a superset of the menu (standing rule): every menu
+action has a flag, so no state is reachable only through the console.
+    stop for now    menu 2, --stop-server
+                    the keep-alive task starts the server again within a minute
+    stop for good   menu 3, --stop-server --stay-stopped
+                    writes the stop-sign marker: task runs stay dead until
+                    a manual start (menu 1 / --start-server) clears it
 
 Usage:
     python mht-viewer-server.py
     python mht-viewer-server.py --port 8090 --save ./saved --no-browser
 
+    python mht-viewer-server.py --start-server                 # menu item 1
+    python mht-viewer-server.py --restart-server               # menu item 1, running copy
+    python mht-viewer-server.py --stop-server                  # menu item 2
+    python mht-viewer-server.py --stop-server --stay-stopped   # menu item 3
+
     # Double-click (Windows): banner + menu with live status and options.
     # Pass --no-dialogs to skip the menu.
+    # Exit codes: 0 ok (incl. nothing to do), 1 failed or aborted, 2 bad usage.
 
     # Keep it alive across reboots/kills (Windows): registers a Scheduled
     # Task that starts the server at logon and re-checks every minute.
@@ -50,7 +65,7 @@ TASK_NAME = "MHTViewerServer"
 MAX_STORED = 50
 MAX_AGE_SEC = 60 * 60
 MAX_BODY = 256 * 1024 * 1024
-SERVER_VERSION = "1.18"
+SERVER_VERSION = "1.19"
 
 store = OrderedDict()
 store_lock = threading.Lock()
@@ -362,7 +377,7 @@ def print_banner_status(host, port, save_dir):
     ]
     if save_dir:
         items.append(("status", ("Save to", save_dir)))
-    items.append(("row", "Stop: re-run this file, menu item 2."))
+    items.append(("row", "Stop: menu items 2/3, or --stop-server [--stay-stopped]."))
     print(_render_box(items, _box_width(fixed), box, pal), flush=True)
 
 
@@ -798,6 +813,29 @@ def stop_server_cmd(host, ports):
     return 1 if failed else 0
 
 
+def _announce_stop(kind, task_installed):
+    """The one line that tells the two stops apart (kind: "now" | "good").
+
+    Shared by menu items 2/3 and by --stop-server [--stay-stopped], so the
+    menu and the flag can never drift apart on what just happened.
+    """
+    if kind == "good":
+        tail = (
+            "auto-start will NOT restart it"
+            if task_installed
+            else "no auto-start is installed either way"
+        )
+        print(f"Stopped for good: {tail} (menu 1 / --start-server resumes).")
+        return
+    if task_installed:
+        print("Stopped for now: auto-start brings it back within a minute.")
+    else:
+        print(
+            "Stopped for now: no auto-start is installed, so it stays off "
+            "(menu 1 / --start-server resumes)."
+        )
+
+
 def _clear_screen():
     """Viewport + scrollback clear (KB §3.2: replace, never append). Only for
     our own console window — never wipe a shared terminal's scrollback."""
@@ -812,7 +850,8 @@ def spawn_server(args):
 
     The menu process never serves: this child (windowless pythonw where
     available, stdio silenced, no window ever) is the server. It survives
-    menu exit.
+    menu exit. Host, port and --save are passed through, so a start on a
+    custom --host/--port really serves there.
     """
     import subprocess as _sp
 
@@ -823,6 +862,8 @@ def spawn_server(args):
         "--no-dialogs",
         "--port",
         str(args.port),
+        "--host",
+        args.host,
     ]
     if args.save:
         cmd += ["--save", args.save]
@@ -840,7 +881,9 @@ def _launch(args, ports, installed):
     """Fresh-start sequence shared by first start and confirmed restart.
 
     Clears the stop-sign, heals a drifted task action, spawns the detached
-    server and waits for it to answer. Menu-only helper (never the task path).
+    server and waits for it to answer. Shared by menu item 1 and by
+    --start-server/--restart-server (never the task path). True if a server
+    ended up answering.
     """
     _clear_stop()  # manual start lifts any stay-dead marker
     if installed and needs_heal():
@@ -852,7 +895,7 @@ def _launch(args, ports, installed):
         spawn_server(args)
     except OSError as e:
         print(f"Could not start it: {e}")
-        return
+        return False
     import time as _t
 
     up = None
@@ -863,16 +906,45 @@ def _launch(args, ports, installed):
             break
     if up is None:
         print("Server did not come up - ports busy?")
-        return
+        return False
     print_banner_status(args.host, up, args.save)
     print("Running in the background. Close this window anytime -")
-    print("the server keeps serving. Re-run this file to stop it.")
+    print("the server keeps serving. Re-run this file for the menu.")
+    return True
+
+
+def start_server_cmd(args, ports, restart=False):
+    """CLI twin of menu item 1: fresh start, or restart a running copy.
+
+    Never prompts - a flag is its own consent. A plain start on a healthy
+    server reports it and exits 0 instead of restarting: a restart wipes the
+    stored pages, so open view tabs would 404. Returns an exit code.
+    """
+    installed = _task_installed()
+    found = _find_ours(args.host, ports)
+    if found and not restart:
+        print(f"Server already running on http://{args.host}:{found}/ - nothing to do.")
+        return 0
+    if found:
+        print(f"Stopping the running copy on port {found} ...")
+        stop_server_cmd(args.host, ports)  # sweep only: never sets the stop-sign
+        if _find_ours(args.host, ports) is not None:
+            # Still up (e.g. no pidfile): it holds the singleton lock, so a
+            # spawn would die quietly and we would report the OLD server as
+            # fresh. Abort instead.
+            print("Could not stop it - leaving it alone.")
+            return 1
+    return 0 if _launch(args, ports, installed) else 1
 
 
 def launcher_menu(args):
     """Numbered menu loop. Banner + live status every iteration; all options
     always listed (unavailable ones explain why). Never serves — choice 1
-    spawns a detached server; quitting leaves everything as it is."""
+    spawns a detached server; quitting leaves everything as it is.
+
+    Items 2 and 3 are the two stop meanings (stop for now / stop for good);
+    every item here has a flag twin (see --start-server/--restart-server/
+    --stop-server [--stay-stopped]/--install-task/--remove-task)."""
     ports = [args.port] + [p for p in PORT_FALLBACKS if p != args.port]
     own = _own_console()
     _, _, _, _, good_c, bad_c, reset_c = _tui_palette()
@@ -891,17 +963,22 @@ def launcher_menu(args):
             print(f"Server    : {bad_c}not listening{reset_c}")
         if installed:
             print(
-                f"Auto-start: {good_c}installed{reset_c} (restarts the server if stopped)"
+                f"Auto-start: {good_c}installed{reset_c} (restarts the server if it dies)"
             )
         else:
             print(f"Auto-start: {bad_c}not installed{reset_c}")
+        if _stop_requested():
+            print(f"Stop-sign : {bad_c}SET{reset_c} - stays off until you press 1")
+        else:
+            print(f"Stop-sign : {good_c}off{reset_c}")
         print("[1] Start server (restart if running)")
-        print("[2] Stop server")
-        print("[3] Install auto-start")
-        print("[4] Remove auto-start")
-        print("[5] Quit (leave everything as it is)")
+        print("[2] Stop for now (auto-start brings it back in a minute)")
+        print("[3] Stop for good (stays off until you start it)")
+        print("[4] Install auto-start")
+        print("[5] Remove auto-start")
+        print("[6] Quit (leave everything as it is)")
         try:
-            choice = input("Choice [1-5]: ").strip()
+            choice = input("Choice [1-6]: ").strip()
         except (OSError, EOFError, RuntimeError):
             return False
         if choice == "1":
@@ -936,27 +1013,30 @@ def launcher_menu(args):
             continue
         if choice == "2":
             stop_server_cmd(args.host, ports)
-            _request_stop()  # stays dead: task runs exit quietly until Start
-            if _task_installed():
-                print("Stop-sign set: auto-start will NOT restart it. Start clears it.")
+            _announce_stop("now", installed)
             continue
         if choice == "3":
+            stop_server_cmd(args.host, ports)
+            _request_stop()  # stays dead: task runs exit quietly until Start
+            _announce_stop("good", installed)
+            continue
+        if choice == "4":
             if installed:
                 print("Auto-start is already installed.")
                 continue
             ok = task_command("install") == 0
             print("Auto-start installed." if ok else "Install failed - see above.")
             continue
-        if choice == "4":
+        if choice == "5":
             if not installed:
                 print("Auto-start is not installed.")
                 continue
             ok = task_command("remove") == 0
             print("Auto-start removed." if ok else "Removal failed - see above.")
             continue
-        if choice == "5":
+        if choice == "6":
             return False
-        print("Pick 1-5.")
+        print("Pick 1-6.")
 
 
 def _task_ps1(action):
@@ -1026,16 +1106,20 @@ def _current_action():
         return None
 
 
-def needs_heal():
-    """Task missing or its action drifted (uv renewed python, file moved)."""
-    cur = _current_action()
+def _action_matches(cur):
+    """True when a registered action is exactly the one we want right now."""
     if not cur:
-        return True
+        return False
     want_exe, want_args = _desired_action()
     return (
-        os.path.normcase(cur[0]) != os.path.normcase(want_exe)
-        or (cur[1] or "") != want_args
+        os.path.normcase(cur[0]) == os.path.normcase(want_exe)
+        and (cur[1] or "") == want_args
     )
+
+
+def needs_heal():
+    """Task missing or its action drifted (uv renewed python, file moved)."""
+    return not _action_matches(_current_action())
 
 
 def task_command(action, quiet=False):
@@ -1084,6 +1168,21 @@ def task_command(action, quiet=False):
             pass
     if not quiet:
         print((r.stdout or "") + (r.stderr or ""))
+    # PowerShell exits 0 as long as its LAST command succeeded, so a denied
+    # Register-ScheduledTask still looks like success (measured live
+    # 2026-10-16: HRESULT 0x80070005 unelevated, the old action left in
+    # place). Read the task back and report the truth.
+    if (
+        action == "install"
+        and r.returncode == 0
+        and not _action_matches(_current_action())
+    ):
+        if not quiet:
+            print(
+                "Registration did not stick (denied, or the task could not "
+                "be read back) - run it elevated, then check --task-status."
+            )
+        return 1
     return r.returncode
 
 
@@ -1143,7 +1242,22 @@ def main():
     ap.add_argument(
         "--stop-server",
         action="store_true",
-        help="stop the running server (same outcome as answering Stop-it? with y) and exit",
+        help="stop the running server (menu item 2: auto-start brings it back) and exit",
+    )
+    ap.add_argument(
+        "--stay-stopped",
+        action="store_true",
+        help="with --stop-server: also set the stop-sign (menu item 3: stays off)",
+    )
+    ap.add_argument(
+        "--start-server",
+        action="store_true",
+        help="start the server in the background (menu item 1) and exit",
+    )
+    ap.add_argument(
+        "--restart-server",
+        action="store_true",
+        help="stop every running copy, then start fresh (menu item 1, running copy)",
     )
     ap.add_argument(
         "--no-dialogs",
@@ -1152,15 +1266,31 @@ def main():
     )
     args = ap.parse_args()
 
+    # Contradictory intent is a usage error, never a guess.
+    if args.stay_stopped and not args.stop_server:
+        ap.error("--stay-stopped only makes sense together with --stop-server")
+    if args.start_server and args.restart_server:
+        ap.error("--start-server and --restart-server are mutually exclusive")
+    if args.stop_server and (args.start_server or args.restart_server):
+        ap.error(
+            "--stop-server cannot be combined with --start-server/--restart-server"
+        )
+
     if args.probe:
         found = _find_ours(
             args.host,
             [args.port] + [p for p in PORT_FALLBACKS if p != args.port],
         )
         if found:
-            print(f"server: listening http://{args.host}:{found}/")
+            print(f"server    : listening http://{args.host}:{found}/")
         else:
-            print("server: not listening")
+            print("server    : not listening")
+        installed = _task_installed()
+        print(f"auto-start: {'installed' if installed else 'not installed'}")
+        if _stop_requested():
+            print("stop-sign : set (auto-start stays off until a start clears it)")
+        else:
+            print("stop-sign : off")
         if os.name == "nt":
             t = task_command("status")
             sys.exit(0 if (found or t == 0) else 1)
@@ -1175,10 +1305,21 @@ def main():
     if args.task_status:
         sys.exit(task_command("status"))
     if args.stop_server:
+        code = stop_server_cmd(
+            args.host,
+            [args.port] + [p for p in PORT_FALLBACKS if p != args.port],
+        )
+        if args.stay_stopped:
+            _request_stop()  # stay dead: task runs exit quietly until a start
+        _announce_stop("good" if args.stay_stopped else "now", _task_installed())
+        sys.exit(code)
+
+    if args.start_server or args.restart_server:
         sys.exit(
-            stop_server_cmd(
-                args.host,
+            start_server_cmd(
+                args,
                 [args.port] + [p for p in PORT_FALLBACKS if p != args.port],
+                restart=args.restart_server,
             )
         )
 

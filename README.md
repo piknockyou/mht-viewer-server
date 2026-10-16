@@ -137,6 +137,16 @@ launchctl unload -w ~/Library/LaunchAgents/com.piknockyou.mhtviewer.plist  # sto
 No systemd/launchd? Cron fallback (reboot only, no crash-heal):
 `@reboot sleep 10; /usr/bin/python3 /path/to/mht-viewer-server.py --no-browser --no-dialogs`
 
+## Tests
+
+`tests/cli_parity_test.py` checks that the menu and the command line agree — start, restart, both stops, the from-task rule, usage errors, the probe lines, a menu render, the banner, an upload round trip and `--save`:
+
+```text
+python tests/cli_parity_test.py
+```
+
+Exit code 0 means every check passed or was reported as skipped. It runs on a scratch port, stages its own payload, refuses to start when a port its stop sweep would reach is already taken, and puts the stop-sign back the way it found it — so it is safe to run while your own server is up.
+
 ## Notes
 
 - Listening address is always `127.0.0.1` (your own machine). Nothing leaves it.
